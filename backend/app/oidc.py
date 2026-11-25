@@ -341,6 +341,9 @@ def _sync_avatar(user: User, claims: dict) -> None:
 
 
 def _apply_claims(user: User, claims: dict) -> None:
+    # 身份字段缺失说明拿到的不是用户资料（例如 IdP 的错误信封），不要覆盖已有角色。
+    if not (claims.get("sub") or claims.get("name") or claims.get("preferred_username")):
+        return
     roles = _resolved_roles(claims)
     groups = _names(claims.get("groups"))
     user.roles = roles
@@ -417,6 +420,25 @@ def ensure_idp_session(db: Session, session: AuthSession, user: User) -> bool:
     return True
 
 
+def _account_payload(payload) -> dict | None:
+    """Casdoor 的账号响应可能是 {status,msg,data} 信封，也可能直接是用户对象。"""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("status") == "ok" and isinstance(payload.get("data"), dict):
+        return payload["data"]
+    if payload.get("sub"):
+        return payload
+    return None
+
+
+def _is_auth_error(payload) -> bool:
+    """Casdoor 有时用 HTTP 200 + status=error 表示 token 过期，需要按未认证处理。"""
+    if not isinstance(payload, dict):
+        return False
+    message = str(payload.get("msg") or "").lower()
+    return payload.get("status") == "error" and ("expired" in message or "login" in message or "token" in message)
+
+
 def fetch_account(access_token: str) -> dict:
     base = issuer()
     headers = {"Authorization": f"Bearer {access_token}", "Accept-Language": "zh"}
@@ -426,10 +448,13 @@ def fetch_account(access_token: str) -> dict:
             raise HTTPException(status_code=401, detail="idp_session_expired")
         if response.status_code == 200:
             payload = response.json()
-            if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("data"), dict):
-                return payload["data"]
-            if isinstance(payload, dict) and payload.get("sub"):
-                return payload
+            account = _account_payload(payload)
+            if account is not None:
+                return account
+            if _is_auth_error(payload):
+                # 200 + status=error 也是 token 失效：交给调用方刷新或重新登录，
+                # 绝不能把错误包当成用户资料写库（会把角色/群组清空）。
+                raise HTTPException(status_code=401, detail="idp_session_expired")
     except HTTPException:
         raise
     except Exception:
@@ -441,8 +466,11 @@ def fetch_account(access_token: str) -> dict:
             raise HTTPException(status_code=401, detail="idp_session_expired")
         response.raise_for_status()
         payload = response.json()
-        if isinstance(payload, dict):
-            return payload
+        account = _account_payload(payload)
+        if account is not None:
+            return account
+        if _is_auth_error(payload):
+            raise HTTPException(status_code=401, detail="idp_session_expired")
     except HTTPException:
         raise
     except Exception as exc:

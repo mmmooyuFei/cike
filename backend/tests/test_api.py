@@ -1,7 +1,58 @@
 from io import BytesIO
 
+import pytest
 from conftest import login
 from PIL import Image
+
+
+def test_fetch_account_rejects_error_envelope(monkeypatch):
+    from fastapi import HTTPException
+
+    from app import oidc
+
+    class ErrorResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "status": "error",
+                "msg": "Access token has expired, expireTime = 2026-11-25T19:03:57+08:00",
+                "data": None,
+            }
+
+    monkeypatch.setattr("app.oidc.httpx.get", lambda *args, **kwargs: ErrorResponse())
+    with pytest.raises(HTTPException) as info:
+        oidc.fetch_account("expired-token")
+    assert info.value.status_code == 401
+
+
+def test_fetch_account_unwraps_ok_envelope(monkeypatch):
+    from app import oidc
+
+    class OkResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "status": "ok",
+                "data": {"sub": "abc", "name": "gabriel", "owner": "jiyi", "roles": ["admin"]},
+            }
+
+    monkeypatch.setattr("app.oidc.httpx.get", lambda *args, **kwargs: OkResponse())
+    claims = oidc.fetch_account("valid-token")
+    assert claims["sub"] == "abc"
+    assert claims["roles"] == ["admin"]
+
+
+def test_apply_claims_ignores_non_user_payload():
+    from app import oidc
+    from app.models import User
+
+    user = User(username="gabriel", roles=["admin"], groups=["jiyi/IT"], is_admin=True)
+    oidc._apply_claims(user, {"status": "error", "msg": "Access token has expired"})
+    assert user.roles == ["admin"]
+    assert user.groups == ["jiyi/IT"]
+    assert user.is_admin is True
 
 
 def test_dev_login_and_isolation(client):
