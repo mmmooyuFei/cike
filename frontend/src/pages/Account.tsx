@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "../api";
 import { useAuth } from "../auth";
-import { Avatar, LogoMark, MODULE_LABELS } from "../components";
+import { Avatar, MODULE_LABELS } from "../components";
 import type { AppContextValue } from "../types";
 
 export function Account({ ctx }: { ctx: AppContextValue }) {
@@ -13,22 +13,13 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
   const [saving, setSaving] = useState(false);
   const [password, setPassword] = useState({ old: "", next: "", confirm: "" });
   const [passwordReady, setPasswordReady] = useState(false);
-  const [brandName, setBrandName] = useState(ctx.brand.name);
-  const [brandSubtitle, setBrandSubtitle] = useState(ctx.brand.subtitle);
-  const [brandSaving, setBrandSaving] = useState(false);
   const avatarInput = useRef<HTMLInputElement>(null);
-  const logoInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setDisplayName(user.display_name);
     setGender(user.gender || "");
     setBirthday(user.birthday || "");
   }, [user.id, user.display_name, user.gender, user.birthday]);
-
-  useEffect(() => {
-    setBrandName(ctx.brand.name);
-    setBrandSubtitle(ctx.brand.subtitle);
-  }, [ctx.brand.name, ctx.brand.subtitle]);
 
   useEffect(() => {
     api
@@ -59,39 +50,6 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
     try {
       await api.upload("/account/avatar", file);
       ctx.toast("头像已更新");
-      ctx.refresh();
-    } catch (error) {
-      ctx.toast(errorText(error));
-    }
-  };
-
-  const saveBrand = async () => {
-    const name = brandName.trim();
-    if (!name) {
-      ctx.toast("站点名称不能为空");
-      return;
-    }
-    setBrandSaving(true);
-    try {
-      await api.put("/settings/brand", { name, subtitle: brandSubtitle.trim() });
-      ctx.toast("品牌已保存");
-      ctx.refresh();
-    } catch (error) {
-      ctx.toast(errorText(error));
-    } finally {
-      setBrandSaving(false);
-    }
-  };
-
-  const uploadLogo = async (file: File | undefined) => {
-    if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-      ctx.toast("LOGO 图片超过 2MB");
-      return;
-    }
-    try {
-      await api.upload("/settings/brand/logo", file);
-      ctx.toast("LOGO 已更新");
       ctx.refresh();
     } catch (error) {
       ctx.toast(errorText(error));
@@ -185,77 +143,6 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
         </div>
       </section>
 
-      {ctx.session.is_admin ? (
-        <section className="panel acct">
-          <div className="panel-head">
-            <div>
-              <h3>品牌与外观</h3>
-              <div className="sub">左上角名称、副标题与 LOGO</div>
-            </div>
-          </div>
-          <div className="panel-body">
-            <div className="brand-box">
-              <div className="brand-preview">
-                {ctx.brand.logo_url ? <img className="brand-logo" src={ctx.brand.logo_url} alt="" /> : <LogoMark size={38} />}
-                <div>
-                  <b>{brandName || "此刻"}</b>
-                  {brandSubtitle ? <small>{brandSubtitle}</small> : null}
-                </div>
-              </div>
-              <div className="brand-fields">
-                <div className="field">
-                  <label htmlFor="brand-name">站点名称</label>
-                  <input id="brand-name" value={brandName} maxLength={12} onChange={(event) => setBrandName(event.target.value)} />
-                </div>
-                <div className="field">
-                  <label htmlFor="brand-subtitle">副标题</label>
-                  <input
-                    id="brand-subtitle"
-                    value={brandSubtitle}
-                    maxLength={24}
-                    placeholder="笔记 · 备忘录"
-                    onChange={(event) => setBrandSubtitle(event.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label>LOGO</label>
-                  <button type="button" className="file-btn" onClick={() => logoInput.current?.click()}>
-                    上传图片
-                  </button>
-                  <input
-                    ref={logoInput}
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    hidden
-                    onChange={(event) => {
-                      void uploadLogo(event.target.files?.[0]);
-                      event.target.value = "";
-                    }}
-                  />
-                </div>
-              </div>
-              <div className="brand-actions">
-                <div className="field-hint">LOGO 用 PNG / JPG / WebP，建议方形，≤2MB；透明底 PNG 会保留透明</div>
-                <div className="btn-row">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setBrandName(ctx.brand.default_name || "此刻");
-                      setBrandSubtitle(ctx.brand.default_subtitle || "笔记 · 备忘录");
-                    }}
-                  >
-                    恢复默认
-                  </button>
-                  <button type="button" className="primary" onClick={() => void saveBrand()} disabled={brandSaving}>
-                    {brandSaving ? "保存中…" : "保存品牌"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      ) : null}
-
       <section className="panel acct">
         <div className="panel-head">
           <div>
@@ -292,7 +179,7 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
           </div>
           {ctx.session.is_admin ? (
             <button type="button" className="link" onClick={() => { window.location.hash = "access"; }}>
-              权限管理 →
+              站点管理 →
             </button>
           ) : null}
         </div>

@@ -48,7 +48,7 @@ const NAV: NavItem[] = [
   { key: "workouts", label: "健身", group: "记录", title: "这个月练了几次？", sub: "一周三次就够，别追满勤。", module: "workouts" },
   { key: "money", label: "资金", group: "钱", title: "这个月钱多了还是少了？", sub: "按账户记：月底填期初和期末。", module: "money" },
   { key: "account", label: "账号设置", group: "个人", title: "账号设置", sub: "管理资料、安全与访问范围。", module: "account" },
-  { key: "access", label: "权限管理", group: "管理", title: "权限管理", sub: "按 Casdoor 角色 / 群组限制模块可见与可编辑。", admin: true },
+  { key: "access", label: "站点管理", group: "管理", title: "站点管理", sub: "品牌外观、访问规则与角色可见性。", admin: true },
   { key: "update", label: "更新管理", group: "管理", title: "更新管理", sub: "查看运行版本，检查并拉取新版本。", admin: true },
 ];
 
