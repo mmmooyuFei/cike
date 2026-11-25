@@ -8,7 +8,17 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..db import get_db
 from ..models import User
-from ..oidc import consume_state, create_state, exchange_code, fetch_account, login_url, upsert_user
+from ..oidc import (
+    consume_state,
+    create_state,
+    ensure_idp_session,
+    exchange_code,
+    fetch_account,
+    login_url,
+    logout_url,
+    token_expires_at,
+    upsert_user,
+)
 from ..permissions import allowed_modules
 from ..security import (
     clear_session,
@@ -42,6 +52,8 @@ def session_info(request: Request, db: Session = Depends(get_db)) -> dict:
         return {"user": None, "is_admin": False, "modules": []}
     user = db.get(User, session.user_id)
     if user is None or not user.is_active:
+        return {"user": None, "is_admin": False, "modules": []}
+    if not ensure_idp_session(db, session, user):
         return {"user": None, "is_admin": False, "modules": []}
     return {
         "user": user_public(user),
@@ -99,7 +111,7 @@ def oidc_callback(
         if not code or not state:
             raise HTTPException(status_code=400, detail="oidc_callback_invalid")
         row = consume_state(db, state)
-        token = exchange_code(code, row.verifier)
+        token = exchange_code(code, row.verifier, row.nonce)
         claims = fetch_account(str(token["access_token"]))
         user = upsert_user(db, claims)
         response = RedirectResponse("/", status_code=303)
@@ -109,6 +121,8 @@ def oidc_callback(
             request,
             response,
             access_token=str(token["access_token"]),
+            refresh_token=str(token.get("refresh_token") or "") or None,
+            token_expires_at=token_expires_at(token),
             idp_owner=str(claims.get("owner") or ""),
         )
         return response
@@ -126,3 +140,13 @@ def oidc_callback(
 def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
     clear_session(db, request, response)
     return {"ok": True}
+
+
+@router.get("/oidc/logout")
+def oidc_logout(request: Request, response: Response, db: Session = Depends(get_db)) -> RedirectResponse:
+    clear_session(db, request, response)
+    try:
+        target = logout_url()
+    except Exception:
+        target = ""
+    return RedirectResponse(target or "/", status_code=303)

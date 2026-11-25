@@ -7,4 +7,5 @@ httpx>=0.28
 python-multipart>=0.0.20
 pillow>=11
 cryptography>=44
+pyjwt[crypto]>=2.8
 pytest>=8.3

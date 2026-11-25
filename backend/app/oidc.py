@@ -4,18 +4,22 @@ import base64
 import hashlib
 import logging
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 from fastapi import HTTPException
+from jwt import PyJWKClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import OidcState, User, utcnow
+from .models import AuthSession, OidcState, User, utcnow
+from .security import decrypt_secret, encrypt_secret
 
 _DISCOVERY: dict[str, dict] = {}
+_JWK_CLIENTS: dict[str, PyJWKClient] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +100,7 @@ def login_url(state: str, verifier: str, nonce: str) -> str:
     return f"{data['authorization_endpoint']}{separator}{urlencode(query)}"
 
 
-def exchange_code(code: str, verifier: str) -> dict:
+def exchange_code(code: str, verifier: str, nonce: str = "") -> dict:
     data = _discovery()
     payload = {
         "grant_type": "authorization_code",
@@ -127,7 +131,169 @@ def exchange_code(code: str, verifier: str) -> dict:
         raise HTTPException(status_code=502, detail="oidc_token_exchange_failed") from exc
     if not token.get("access_token"):
         raise HTTPException(status_code=502, detail="oidc_token_exchange_failed")
+    id_token = str(token.get("id_token") or "")
+    if not id_token:
+        raise HTTPException(status_code=502, detail="oidc_id_token_invalid")
+    validate_id_token(id_token, nonce)
     return token
+
+
+def validate_id_token(id_token: str, nonce: str = "") -> dict:
+    data = _discovery()
+    jwks_uri = str(data.get("jwks_uri") or "")
+    if not jwks_uri:
+        raise HTTPException(status_code=502, detail="oidc_id_token_invalid")
+    client = _JWK_CLIENTS.get(jwks_uri)
+    if client is None:
+        client = PyJWKClient(jwks_uri, cache_jwk_set=True, lifespan=300, timeout=15)
+        _JWK_CLIENTS[jwks_uri] = client
+    try:
+        signing_key = client.get_signing_key_from_jwt(id_token).key
+        claims = jwt.decode(
+            id_token,
+            signing_key,
+            algorithms=["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"],
+            audience=settings.oidc_client_id,
+            issuer=issuer(),
+            options={"require": ["exp", "iat", "sub", "aud", "iss"]},
+        )
+    except Exception as exc:
+        logger.warning("oidc id_token validation failed: %s: %s", type(exc).__name__, exc)
+        raise HTTPException(status_code=502, detail="oidc_id_token_invalid") from exc
+    if nonce and str(claims.get("nonce") or "") != nonce:
+        logger.warning("oidc id_token nonce mismatch")
+        raise HTTPException(status_code=502, detail="oidc_id_token_invalid")
+    return claims
+
+
+def token_expires_at(token: dict) -> datetime | None:
+    expires_in = token.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        return utcnow() + timedelta(seconds=int(expires_in))
+    access = str(token.get("access_token") or "")
+    if access:
+        try:
+            claims = jwt.decode(access, options={"verify_signature": False})
+            exp = claims.get("exp")
+            if isinstance(exp, (int, float)):
+                return datetime.fromtimestamp(exp, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+    return utcnow() + timedelta(hours=1)
+
+
+def refresh_tokens(refresh_token: str) -> dict | None:
+    if not refresh_token:
+        return None
+    data = _discovery()
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": settings.oidc_client_id,
+        "refresh_token": refresh_token,
+    }
+    if settings.oidc_client_secret:
+        payload["client_secret"] = settings.oidc_client_secret
+    try:
+        response = httpx.post(data["token_endpoint"], data=payload, timeout=15)
+        response.raise_for_status()
+        token = response.json()
+    except Exception as exc:
+        logger.warning("oidc refresh failed: %s", type(exc).__name__)
+        return None
+    if not token.get("access_token"):
+        return None
+    return token
+
+
+def logout_url() -> str:
+    try:
+        data = _discovery()
+    except HTTPException:
+        return ""
+    endpoint = str(data.get("end_session_endpoint") or "")
+    if not endpoint:
+        return ""
+    query = {"client_id": settings.oidc_client_id}
+    if settings.oidc_post_logout_redirect_uri:
+        query["post_logout_redirect_uri"] = settings.oidc_post_logout_redirect_uri
+    separator = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{separator}{urlencode(query)}"
+
+
+def _apply_claims(user: User, claims: dict) -> None:
+    roles = _names(claims.get("roles"))
+    groups = _names(claims.get("groups"))
+    user.roles = roles
+    user.groups = groups
+    user.is_admin = any(
+        role == settings.admin_role or role.rsplit("/", 1)[-1] == settings.admin_role
+        for role in roles
+    )
+
+
+def _drop_session(db: Session, session: AuthSession) -> None:
+    db.delete(session)
+    db.commit()
+
+
+def _refresh_session(db: Session, session: AuthSession) -> str | None:
+    refresh = decrypt_secret(session.idp_refresh_token)
+    token = refresh_tokens(refresh or "")
+    if token is None:
+        return None
+    session.idp_access_token = encrypt_secret(str(token["access_token"]))
+    if token.get("refresh_token"):
+        session.idp_refresh_token = encrypt_secret(str(token["refresh_token"]))
+    session.idp_token_expires_at = token_expires_at(token)
+    db.commit()
+    return str(token["access_token"])
+
+
+def ensure_idp_session(db: Session, session: AuthSession, user: User) -> bool:
+    """校验 IdP 会话；access token 过期时用 refresh token 续期。"""
+    if user.idp_issuer == "dev":
+        return True
+    now = utcnow()
+    access = decrypt_secret(session.idp_access_token)
+    if not access and not decrypt_secret(session.idp_refresh_token):
+        return False
+    if session.idp_checked_at and (now - session.idp_checked_at).total_seconds() < settings.idp_check_interval_seconds:
+        if not session.idp_token_expires_at or session.idp_token_expires_at > now + timedelta(seconds=60):
+            return True
+    if not access:
+        access = _refresh_session(db, session)
+        if not access:
+            _drop_session(db, session)
+            return False
+    elif session.idp_token_expires_at and session.idp_token_expires_at <= now + timedelta(seconds=60):
+        access = _refresh_session(db, session)
+        if not access:
+            _drop_session(db, session)
+            return False
+    try:
+        claims = fetch_account(access)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            access = _refresh_session(db, session)
+            if not access:
+                _drop_session(db, session)
+                return False
+            try:
+                claims = fetch_account(access)
+            except HTTPException:
+                _drop_session(db, session)
+                return False
+        else:
+            # IdP 暂时不可用时不强退本站会话，避免网络抖动导致全员掉线。
+            session.idp_checked_at = utcnow()
+            db.commit()
+            return True
+    _apply_claims(user, claims)
+    if claims.get("owner"):
+        session.idp_owner = str(claims.get("owner"))
+    session.idp_checked_at = utcnow()
+    db.commit()
+    return True
 
 
 def fetch_account(access_token: str) -> dict:
@@ -135,21 +301,29 @@ def fetch_account(access_token: str) -> dict:
     headers = {"Authorization": f"Bearer {access_token}", "Accept-Language": "zh"}
     try:
         response = httpx.get(f"{base}/api/get-account", headers=headers, timeout=12)
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="idp_session_expired")
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("data"), dict):
                 return payload["data"]
             if isinstance(payload, dict) and payload.get("sub"):
                 return payload
+    except HTTPException:
+        raise
     except Exception:
         pass
     data = _discovery()
     try:
         response = httpx.get(data["userinfo_endpoint"], headers=headers, timeout=12)
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="idp_session_expired")
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, dict):
             return payload
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail="oidc_userinfo_failed") from exc
     raise HTTPException(status_code=502, detail="oidc_userinfo_failed")

@@ -51,6 +51,8 @@ def create_session(
     response: Response,
     *,
     access_token: str | None = None,
+    refresh_token: str | None = None,
+    token_expires_at: datetime | None = None,
     idp_owner: str | None = None,
 ) -> AuthSession:
     token = new_token()
@@ -60,6 +62,9 @@ def create_session(
         user_id=user.id,
         csrf_hash=hash_token(csrf),
         idp_access_token=encrypt_secret(access_token) if access_token else None,
+        idp_refresh_token=encrypt_secret(refresh_token) if refresh_token else None,
+        idp_token_expires_at=token_expires_at,
+        idp_checked_at=utcnow(),
         idp_owner=idp_owner,
         expires_at=utcnow() + timedelta(days=SESSION_DAYS),
         ip=request.client.host if request.client else None,
@@ -123,6 +128,10 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = db.get(User, session.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="account_unavailable")
+    from .oidc import ensure_idp_session
+
+    if not ensure_idp_session(db, session, user):
+        raise HTTPException(status_code=401, detail="session_expired")
     request.state.session = session
     return user
 

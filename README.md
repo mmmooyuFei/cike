@@ -106,6 +106,7 @@ bash scripts/1panel-site.sh
 | `OIDC_PKCE` | 否 | IdP 支持 PKCE 时设为 `true`，默认 `false` |
 | `OIDC_DISPLAY_NAME` | 否 | 登录按钮与跳转页显示的身份提供方名称 |
 | `OIDC_AUTO_LOGIN` | 否 | 默认 `true`：未登录时自动跳转统一认证 |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | 否 | RP 退出后回跳地址，需在 IdP 应用登记 |
 | `ADMIN_ROLE` | 否 | 站点管理员角色名，默认 `admin` |
 | `BRAND_DEFAULT_NAME` | 否 | 默认品牌名 |
 | `DATA_DIR` | 否 | 运行期数据目录，默认 `data` |
