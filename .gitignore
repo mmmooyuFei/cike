@@ -1,0 +1,27 @@
+# 依赖与产物
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# 环境与凭证：只保留示例文件
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 系统
+.DS_Store
+Thumbs.db
+
+tmp-e2e/
+*.tsbuildinfo
+tmp-*/
