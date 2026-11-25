@@ -20,6 +20,8 @@ from .security import decrypt_secret, encrypt_secret
 
 _DISCOVERY: dict[str, dict] = {}
 _JWK_CLIENTS: dict[str, PyJWKClient] = {}
+_ADMIN_TOKEN: dict[str, object] = {"token": "", "expires_at": utcnow()}
+_ROLES_CACHE: dict[str, tuple[datetime, list[dict]]] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +57,113 @@ def _names(value) -> list[str]:
         elif item:
             result.append(str(item))
     return result
+
+
+def _admin_token() -> str | None:
+    if not settings.casdoor_admin_user or not settings.casdoor_admin_password:
+        return None
+    cached = str(_ADMIN_TOKEN.get("token") or "")
+    expires_at = _ADMIN_TOKEN.get("expires_at")
+    if cached and isinstance(expires_at, datetime) and expires_at > utcnow():
+        return cached
+    application = settings.casdoor_application or "app-built-in"
+    try:
+        with httpx.Client(timeout=15) as client:
+            login = client.post(
+                f"{issuer()}/api/login",
+                json={
+                    "organization": "built-in",
+                    "username": settings.casdoor_admin_user,
+                    "password": settings.casdoor_admin_password,
+                    "autoSignin": True,
+                    "application": application,
+                    "type": "login",
+                },
+            )
+            login.raise_for_status()
+            payload = login.json()
+            if payload.get("status") != "ok":
+                logger.warning("casdoor admin login rejected")
+                return None
+            account = client.get(f"{issuer()}/api/get-account")
+            account.raise_for_status()
+            data = (account.json() or {}).get("data") or {}
+            token = str(data.get("accessToken") or "").strip()
+    except Exception as exc:
+        logger.warning("casdoor admin login failed: %s", type(exc).__name__)
+        return None
+    if not token:
+        return None
+    _ADMIN_TOKEN["token"] = token
+    _ADMIN_TOKEN["expires_at"] = utcnow() + timedelta(minutes=8)
+    return token
+
+
+def _admin_request(path: str, *, params=None, json_body=None) -> dict:
+    token = _admin_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="idp_admin_unavailable")
+    try:
+        response = httpx.post(
+            f"{issuer()}{path}",
+            params=params,
+            json=json_body,
+            headers={"Authorization": f"Bearer {token}", "Accept-Language": "zh"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        logger.warning("casdoor admin request failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="idp_admin_request_failed") from exc
+
+
+def _list_roles(owner: str) -> list[dict] | None:
+    cached = _ROLES_CACHE.get(owner)
+    if cached and (utcnow() - cached[0]).total_seconds() < 60:
+        return cached[1]
+    token = _admin_token()
+    if not token:
+        return None
+    try:
+        response = httpx.get(
+            f"{issuer()}/api/get-roles",
+            params={"owner": owner},
+            headers={"Authorization": f"Bearer {token}", "Accept-Language": "zh"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        roles = payload.get("data")
+        if payload.get("status") != "ok" or not isinstance(roles, list):
+            return None
+    except Exception:
+        return None
+    _ROLES_CACHE[owner] = (utcnow(), roles)
+    return roles
+
+
+def _resolved_roles(claims: dict) -> list[str]:
+    roles = _names(claims.get("roles"))
+    owner = str(claims.get("owner") or "").strip()
+    username = str(claims.get("name") or claims.get("preferred_username") or "").strip()
+    groups = _names(claims.get("groups"))
+    if not owner or not username:
+        return roles
+    definitions = _list_roles(owner)
+    if definitions is None:
+        return roles
+    user_ref = f"{owner}/{username}"
+    short_groups = {group.rsplit("/", 1)[-1] for group in groups}
+    resolved: list[str] = []
+    for definition in definitions:
+        users = [str(value) for value in (definition.get("users") or [])]
+        role_groups = [str(value) for value in (definition.get("groups") or [])]
+        if user_ref in users or any(group.rsplit("/", 1)[-1] in short_groups for group in role_groups):
+            name = str(definition.get("name") or "")
+            if name:
+                resolved.append(name)
+    return resolved if resolved else roles
 
 
 def create_state(db: Session) -> tuple[str, str, str]:
@@ -221,7 +330,7 @@ def logout_url() -> str:
 
 
 def _apply_claims(user: User, claims: dict) -> None:
-    roles = _names(claims.get("roles"))
+    roles = _resolved_roles(claims)
     groups = _names(claims.get("groups"))
     user.roles = roles
     user.groups = groups
@@ -334,7 +443,7 @@ def upsert_user(db: Session, claims: dict) -> User:
     if not sub:
         raise HTTPException(status_code=502, detail="oidc_subject_missing")
     owner = str(claims.get("owner") or "").strip()
-    roles = _names(claims.get("roles"))
+    roles = _resolved_roles(claims)
     groups = _names(claims.get("groups"))
     is_admin = any(
         role == settings.admin_role or role.rsplit("/", 1)[-1] == settings.admin_role
@@ -380,6 +489,75 @@ def upsert_user(db: Session, claims: dict) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def update_user_admin(user_ref: str, column: str, value: str) -> None:
+    payload = _admin_request(
+        "/api/update-user",
+        params={"id": user_ref, "columns": column},
+        json_body={column: value},
+    )
+    if payload.get("status") != "ok":
+        message = str(payload.get("msg") or "").lower()
+        if "unauthor" in message:
+            raise HTTPException(status_code=403, detail="idp_forbidden")
+        raise HTTPException(status_code=502, detail="idp_update_failed")
+
+
+def update_user_with_token(access_token: str, user_ref: str, column: str, value: str) -> None:
+    try:
+        response = httpx.post(
+            f"{issuer()}/api/update-user",
+            params={"id": user_ref, "columns": column},
+            json={column: value},
+            headers={"Authorization": f"Bearer {access_token}", "Accept-Language": "zh"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="idp_update_failed") from exc
+    if payload.get("status") != "ok":
+        message = str(payload.get("msg") or "").lower()
+        if "unauthor" in message:
+            raise HTTPException(status_code=403, detail="idp_forbidden")
+        raise HTTPException(status_code=502, detail="idp_update_failed")
+
+
+def upload_avatar_with_token(
+    access_token: str,
+    owner: str,
+    username: str,
+    content: bytes,
+    content_type: str = "image/png",
+) -> str:
+    try:
+        response = httpx.post(
+            f"{issuer()}/api/upload-resource",
+            params={
+                "owner": owner,
+                "user": username,
+                "fullFilePath": f"avatar/{owner}/{username}.png",
+                "tag": "avatar",
+            },
+            files={"file": (f"{username}.png", content, content_type)},
+            headers={"Authorization": f"Bearer {access_token}", "Accept-Language": "zh"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="idp_avatar_upload_failed") from exc
+    url = payload.get("data")
+    if payload.get("status") != "ok" or not isinstance(url, str) or not url.strip():
+        raise HTTPException(status_code=502, detail="idp_avatar_upload_failed")
+    if url.startswith("/"):
+        url = f"{issuer()}{url}"
+    return url
+
+
+def resolve_roles(claims: dict) -> list[str]:
+    return _resolved_roles(claims)
 
 
 def set_password(access_token: str, owner: str, username: str, old_password: str, new_password: str) -> None:

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..db import get_db
 from ..models import User
-from ..oidc import set_password
+from ..oidc import set_password, update_user_admin, update_user_with_token, upload_avatar_with_token
 from ..security import clear_session, current_user, decrypt_secret, is_admin, read_session, require_csrf, user_public
 
 router = APIRouter(prefix="/api/account", tags=["account"])
@@ -39,6 +39,14 @@ def update_profile(payload: dict, user: User = Depends(current_user), db: Sessio
     user.display_name = display_name
     user.gender = gender or None
     user.birthday = birthday
+    if not settings.dev_auth:
+        session = read_session(request, db)
+        owner = (session.idp_owner if session else "") or ""
+        if not owner:
+            raise HTTPException(status_code=409, detail="reauthorize_required")
+        update_user_admin(f"{owner}/{user.username}", "displayName", display_name)
+        update_user_admin(f"{owner}/{user.username}", "gender", {"male": "Male", "female": "Female"}.get(gender, ""))
+        update_user_admin(f"{owner}/{user.username}", "birthday", birthday_raw)
     db.commit()
     db.refresh(user)
     return user_public(user)
@@ -58,10 +66,21 @@ async def upload_avatar(
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
         image.thumbnail((512, 512))
-        target = settings.avatar_path / f"{user.id}.png"
-        image.save(target, "PNG")
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        content = buffer.getvalue()
     except Exception as exc:
         raise HTTPException(status_code=422, detail="invalid_image") from exc
+    if not settings.dev_auth:
+        session = read_session(request, db)
+        access = decrypt_secret(session.idp_access_token) if session else None
+        owner = (session.idp_owner if session else "") or ""
+        if not access or not owner:
+            raise HTTPException(status_code=409, detail="reauthorize_required")
+        avatar_url = upload_avatar_with_token(access, owner, user.username, content)
+        update_user_with_token(access, f"{owner}/{user.username}", "avatar", avatar_url)
+    target = settings.avatar_path / f"{user.id}.png"
+    target.write_bytes(content)
     user.avatar_url = f"/api/account/avatar?v={int(time.time())}"
     db.commit()
     return {"avatar_url": user.avatar_url}

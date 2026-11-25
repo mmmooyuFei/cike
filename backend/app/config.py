@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     idp_check_interval_seconds: int = 300
     admin_role: str = "admin"
 
+    casdoor_admin_user: str = ""
+    casdoor_admin_password: str = ""
+    casdoor_application: str = ""
+
     brand_default_name: str = "此刻"
     data_dir: str = "data"
 
