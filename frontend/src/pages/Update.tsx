@@ -152,141 +152,203 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
   }
 
   if (!status) return null;
+
   const repo = status.repo;
+  const behind = repo.sync?.behind ?? 0;
+  const outdated = status.hint === "running_commit_differs";
+  const state = !repo.available
+    ? { text: "未挂载仓库", tone: "muted" }
+    : outdated
+      ? { text: "仓库已更新，待重建", tone: "warn" }
+      : behind > 0
+        ? { text: `落后 ${behind} 个提交`, tone: "warn" }
+        : { text: "已是最新", tone: "ok" };
+  const deployment = status.running.deployment === "docker" ? "Docker 容器" : "主机进程";
+  const runningShort = status.running.commit_short || "—";
 
   return (
-    <div className="stack">
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h3>运行版本</h3>
-            <div className="sub">镜像构建时写入的提交号；更新后需要重建镜像才会变化</div>
+    <div className="upd">
+      <section className="upd-hero">
+        <div className="upd-hero-main">
+          <div className="upd-eyebrow">运行版本</div>
+          <div className="upd-version">
+            <button
+              type="button"
+              className="upd-hash"
+              title="复制运行提交"
+              onClick={() => void copy(status.running.commit || runningShort, "运行提交")}
+            >
+              {runningShort}
+            </button>
+            <span className={`pill ${state.tone}`}>{state.text}</span>
           </div>
-          <button type="button" onClick={() => void load()} disabled={loading}>刷新</button>
+          <div className="upd-sub">
+            <span>{deployment}</span>
+            {repo.available ? (
+              <>
+                <i />
+                <span>{repo.branch}{repo.detached ? "（分离 HEAD）" : ""}</span>
+                <i />
+                <span>工作区 {repo.dirty ? `${repo.dirty_files} 个改动` : "干净"}</span>
+                {repo.date ? (
+                  <>
+                    <i />
+                    <span>{repo.date} · {repo.author}</span>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
-        <div className="panel-body">
-          <div className="perm-grid">
-            <div>
-              <label>运行提交</label>
-              <div className="tags outline">
-                <span>{status.running.commit_short || "未记录（旧镜像）"}</span>
-                <span>{status.running.deployment === "docker" ? "Docker 容器" : "主机进程"}</span>
-              </div>
-            </div>
-            <div>
-              <label>仓库状态</label>
-              <div className="tags outline">
-                <span>{repo.available ? `${repo.branch}${repo.detached ? "（分离 HEAD）" : ""}` : "未挂载仓库"}</span>
-                <span>{repo.available ? syncText(repo) : "仅版本号"}</span>
-              </div>
-            </div>
-          </div>
-          {repo.available ? (
-            <>
-              <div className="fin-row">
-                <span className="acct">当前提交</span>
-                <b>{repo.commit_short} · {repo.subject || "—"}</b>
-              </div>
-              <div className="fin-row">
-                <span className="acct">提交时间 / 作者</span>
-                <b className="muted">{repo.date || "—"} · {repo.author || "—"}</b>
-              </div>
-              <div className="fin-row">
-                <span className="acct">工作区</span>
-                <b className={repo.dirty ? "down" : "up"}>{repo.dirty ? `有 ${repo.dirty_files} 个未提交改动` : "干净"}</b>
-              </div>
-              <div className="fin-row">
-                <span className="acct">远端</span>
-                <b className="muted">{repo.remote || "未配置 origin"}</b>
-              </div>
-            </>
-          ) : (
-            <div className="note">
-              {REASON_TEXT[repo.reason || ""] || "容器里没有可用的 Git 仓库。"}
-              {repo.output ? `（${repo.output}）` : ""}
-              <br />
-              需要在线检查 / 拉取时，在 <code>docker-compose.yml</code> 里挂载仓库并设置 <code>UPDATE_REPO_DIR</code>：
-              <br />
-              <code>{status.commands.enable_repo}</code>
-            </div>
-          )}
-          {status.hint === "running_commit_differs" ? (
-            <div className="note">
-              仓库 HEAD 与运行版本不一致：代码已经更新，但镜像还是旧的。执行 <code>{status.commands.update}</code> 重建。
-            </div>
-          ) : null}
-          {status.hint === "repo_readonly" ? (
-            <div className="note">
-              仓库是只读挂载：可以看提交记录，但无法发「检查远端 / 拉取更新」。需要拉取时把挂载改成 <code>:rw</code>。
-            </div>
-          ) : null}
+        <div className="upd-actions">
+          <button type="button" className="primary" disabled={!status.capabilities.pull || busy !== null} onClick={() => void pull()}>
+            {busy === "pull" ? "拉取中…" : "拉取更新"}
+          </button>
+          <button type="button" disabled={!status.capabilities.fetch || busy !== null} onClick={() => void checkRemote()}>
+            {busy === "fetch" ? "检查中…" : "检查远端"}
+          </button>
+          <button type="button" onClick={() => void copy(status.commands.update, "更新命令")}>复制更新命令</button>
+          <button
+            type="button"
+            className="ghost danger-text"
+            disabled={!status.capabilities.restart || busy !== null}
+            title={status.capabilities.restart ? "重启服务进程" : "需要 UPDATE_ALLOW_RESTART=true"}
+            onClick={() => void restart()}
+          >
+            {busy === "restart" ? "重启中…" : "重启服务"}
+          </button>
+          <button type="button" className="ghost" disabled={loading} onClick={() => void load()}>
+            {loading ? "刷新中…" : "刷新"}
+          </button>
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h3>检查与更新</h3>
-            <div className="sub">只做 git 操作；重建镜像与健康检查交给 scripts/update.sh</div>
-          </div>
+      {!repo.available ? (
+        <div className="note">
+          {REASON_TEXT[repo.reason || ""] || "容器里没有可用的 Git 仓库。"}
+          {repo.output ? `（${repo.output}）` : ""}
+          {" "}在 <code>docker-compose.yml</code> 挂载仓库并设置 <code>UPDATE_REPO_DIR</code> 后可查看分支与提交。
         </div>
-        <div className="panel-body">
-          <div className="btn-row">
-            <button type="button" disabled={!status.capabilities.fetch || busy !== null} onClick={() => void checkRemote()}>
-              {busy === "fetch" ? "检查中…" : "检查远端"}
-            </button>
-            <button type="button" className="primary" disabled={!status.capabilities.pull || busy !== null} onClick={() => void pull()}>
-              {busy === "pull" ? "拉取中…" : "拉取更新"}
-            </button>
-            <button type="button" disabled={!status.capabilities.restart || busy !== null} onClick={() => void restart()}>
-              {busy === "restart" ? "重启中…" : "重启服务"}
-            </button>
-            <button type="button" onClick={() => void copy(status.commands.update, "更新命令")}>复制更新命令</button>
-          </div>
-          <div className="note">
-            生产更新流程：<code>{status.commands.update}</code> 会依次执行「git pull → pg_dump 备份 → 构建镜像 → 重建容器 →
-            健康检查（<code>{status.commands.health}</code>）→ 失败回滚」，备份保留最近 10 份。
-          </div>
-          {!status.capabilities.fetch ? (
-            <div className="field-hint">未挂载仓库时，「检查远端 / 拉取更新」不可用。</div>
-          ) : null}
+      ) : null}
+      {outdated ? <div className="note">仓库 HEAD 与运行版本不一致：代码已经更新，但镜像还是旧的。执行 <code>{status.commands.update}</code> 重建。</div> : null}
+      {status.hint === "repo_readonly" ? (
+        <div className="note">仓库是只读挂载：可以看提交记录，但无法发「检查远端 / 拉取更新」。需要拉取时把挂载改成 <code>:rw</code>。</div>
+      ) : null}
+
+      <div className="upd-grid">
+        <div className="upd-col">
+          <section className="upd-card">
+            <div className="upd-card-head">
+              <div>
+                <h3>最近提交</h3>
+                <p>{repo.available ? `${repo.upstream || "origin"} · 最多 15 条` : "未挂载仓库"}</p>
+              </div>
+              <button type="button" className="ghost" disabled={!repo.available || loading} onClick={() => void load()}>
+                刷新
+              </button>
+            </div>
+            {!repo.available ? (
+              <div className="upd-empty">
+                <b>只能看到构建时的版本</b>
+                <p>挂载仓库后，这里会按时间列出远端最近的提交，并标出当前部署的那条。</p>
+              </div>
+            ) : commits.length === 0 ? (
+              <div className="upd-empty">
+                <b>还没有提交记录</b>
+                <p>点「检查远端」拉取一次远端引用后再看。</p>
+              </div>
+            ) : (
+              <div className="commit-list">
+                {commits.map((commit) => {
+                  const runningHere =
+                    Boolean(status.running.commit) && commit.hash.startsWith(status.running.commit);
+                  return (
+                    <div className={`commit-row ${commit.current ? "is-current" : ""}`} key={commit.hash}>
+                      <code className="commit-hash">{commit.short}</code>
+                      <div className="commit-body">
+                        <div className="commit-subject" title={commit.subject}>{commit.subject}</div>
+                        <div className="commit-meta">
+                          <span>{commit.author}</span>
+                          <span>·</span>
+                          <span>{commit.date}</span>
+                          {runningHere ? (
+                            <span className="pill ok">运行中</span>
+                          ) : commit.current ? (
+                            <span className="pill muted">仓库 HEAD</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <aside className="upd-side">
+          <section className="upd-card">
+            <div className="upd-card-head">
+              <div>
+                <h3>仓库</h3>
+                <p>{repo.available ? "当前挂载的 Git 仓库" : "未挂载"}</p>
+              </div>
+            </div>
+            <dl className="upd-kv">
+              <div>
+                <dt>分支</dt>
+                <dd>{repo.available ? `${repo.branch}${repo.detached ? "（分离）" : ""}` : "—"}</dd>
+              </div>
+              <div>
+                <dt>同步</dt>
+                <dd>{repo.available ? syncText(repo) : "—"}</dd>
+              </div>
+              <div>
+                <dt>工作区</dt>
+                <dd className={repo.dirty ? "bad" : "good"}>{repo.available ? (repo.dirty ? `${repo.dirty_files} 个未提交改动` : "干净") : "—"}</dd>
+              </div>
+              <div>
+                <dt>远端</dt>
+                <dd className="mono">{repo.remote || "—"}</dd>
+              </div>
+              <div>
+                <dt>路径</dt>
+                <dd className="mono">{repo.path || "—"}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="upd-card">
+            <div className="upd-card-head">
+              <div>
+                <h3>更新流程</h3>
+                <p>重建镜像仍走服务器脚本</p>
+              </div>
+              <button type="button" className="ghost" onClick={() => void copy(status.commands.update, "更新命令")}>
+                复制
+              </button>
+            </div>
+            <ol className="upd-steps">
+              <li><b>拉取代码</b><code>git pull --ff-only</code></li>
+              <li><b>备份数据库</b><code>pg_dump</code>，保留最近 10 份</li>
+              <li><b>构建镜像</b>写入提交号 <code>GIT_COMMIT</code></li>
+              <li><b>重建容器</b>并等待健康检查</li>
+              <li><b>失败回滚</b>到上一个镜像</li>
+            </ol>
+            <div className="upd-note">
+              页面上的「拉取更新」只更新仓库；重建镜像与健康检查请执行
+              <code>{status.commands.update}</code>。
+            </div>
+          </section>
+
           {!status.capabilities.restart ? (
-            <div className="field-hint">「重启服务」默认关闭：需要设置 UPDATE_ALLOW_RESTART=true，并保证容器有 restart 策略。</div>
+            <p className="upd-hint">「重启服务」默认关闭：需要 <code>UPDATE_ALLOW_RESTART=true</code>，并保证容器有 restart 策略。</p>
           ) : null}
-        </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h3>最近提交</h3>
-            <div className="sub">{repo.available ? `来自 ${repo.upstream || "origin"}` : "未挂载仓库"}</div>
-          </div>
-        </div>
-        <div className="panel-body">
-          {!repo.available ? (
-            <div className="empty small">
-              <b>只能看到构建时的版本</b>
-              <p>挂载仓库后，这里会列出远端最近的提交，并标出当前运行的那一条。</p>
-            </div>
-          ) : commits.length === 0 ? (
-            <div className="empty small">
-              <b>还没有提交记录</b>
-              <p>检查远端后再看一次。</p>
-            </div>
-          ) : (
-            commits.map((commit) => (
-              <div className="fin-row" key={commit.hash}>
-                <span className="acct">
-                  <i>{commit.current ? "●" : ""}</i>
-                  {commit.subject}
-                </span>
-                <b className="muted">{commit.short} · {commit.date}</b>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
+          {!status.capabilities.fetch ? (
+            <p className="upd-hint">未挂载仓库时，「检查远端 / 拉取更新」不可用。</p>
+          ) : null}
+        </aside>
+      </div>
     </div>
   );
 }
