@@ -149,7 +149,22 @@ a.btn {
 .kpi .hint { font-size: 11px; color: var(--sub); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* panels */
-.cols { display: grid; grid-template-columns: 1.15fr 1fr; gap: 14px; align-items: start; }
+.cols { display: grid; grid-template-columns: 1.15fr 1fr; gap: 14px; align-items: stretch; }
+/* 两列容器只做分组，不参与布局：卡片直接进入上面的 grid，按行对齐、同行等高 */
+.cols > div { display: contents; }
+.cols .panel { margin-bottom: 0; display: flex; flex-direction: column; }
+.cols .panel > .panel-body { flex: 1; }
+@media (min-width: 1181px) {
+  /* 驾驶舱固定行位置：第一列 专注节奏 / 今日坚持 / 今天在专注什么 / 今天要做（通栏），
+     第二列 睡眠 / 资金 / 年度里程碑。新增卡片时记得同步这里。 */
+  .cols > div:first-child > .panel:nth-child(1) { grid-column: 1; grid-row: 1; }
+  .cols > div:first-child > .panel:nth-child(2) { grid-column: 1; grid-row: 2; }
+  .cols > div:first-child > .panel:nth-child(3) { grid-column: 1; grid-row: 3; }
+  .cols > div:first-child > .panel:nth-child(4) { grid-column: 1 / -1; grid-row: 4; }
+  .cols > div:last-child > .panel:nth-child(1) { grid-column: 2; grid-row: 1; }
+  .cols > div:last-child > .panel:nth-child(2) { grid-column: 2; grid-row: 2; }
+  .cols > div:last-child > .panel:nth-child(3) { grid-column: 2; grid-row: 3; }
+}
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 14px; overflow: hidden; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid var(--line); gap: 10px; }
 .panel-head h3 { margin: 0; font-size: 13.5px; letter-spacing: 0.4px; font-weight: 600; }
