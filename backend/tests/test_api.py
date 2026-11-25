@@ -374,6 +374,38 @@ def test_legacy_avatar_cache_repaired(client, monkeypatch):
     assert image.getpixel((8, 8))[3] == 0
 
 
+def test_refresh_identity_from_admin(monkeypatch):
+    from types import SimpleNamespace
+
+    from app import oidc
+    from app.models import User
+
+    monkeypatch.setattr(
+        "app.oidc._admin_user",
+        lambda owner, name: {
+            "name": "gabriel",
+            "owner": "jiyi",
+            "roles": [{"name": "admin"}],
+            "groups": ["jiyi/IT组"],
+            "isForbidden": False,
+        },
+    )
+    monkeypatch.setattr("app.oidc._list_roles", lambda owner: [])
+
+    user = User(username="gabriel", roles=[], groups=[], is_admin=False)
+    session = SimpleNamespace(idp_owner="jiyi")
+    assert oidc._refresh_identity_from_admin(session, user) is True
+    assert user.roles == ["admin"]
+    assert user.groups == ["jiyi/IT组"]
+    assert user.is_admin is True
+
+    monkeypatch.setattr("app.oidc._admin_user", lambda owner, name: {"name": "gabriel", "isForbidden": True})
+    assert oidc._refresh_identity_from_admin(session, user) is False
+
+    monkeypatch.setattr("app.oidc._admin_user", lambda owner, name: None)
+    assert oidc._refresh_identity_from_admin(session, user) is None
+
+
 def test_update_status_admin_only(client):
     user = login(client)
     assert client.get("/api/update/status").status_code == 403

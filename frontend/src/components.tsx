@@ -144,7 +144,9 @@ export function Avatar({
 }
 
 export const MODULE_LABELS: Record<string, string> = {
+  dashboard: "驾驶舱",
   todos: "待办",
+  habits: "坚持打卡",
   milestones: "里程碑",
   daily: "每日日志",
   sleep: "睡眠",

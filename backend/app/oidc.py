@@ -373,6 +373,58 @@ def _refresh_session(db: Session, session: AuthSession) -> str | None:
     return str(token["access_token"])
 
 
+def _admin_user(owner: str, username: str) -> dict | None:
+    """用 IdP 管理员身份读回用户资料（用于 access token 失效时补同步角色）。"""
+    token = _admin_token()
+    if not token or not owner or not username:
+        return None
+    try:
+        response = httpx.get(
+            f"{issuer()}/api/get-user",
+            params={"id": f"{owner}/{username}"},
+            headers={"Authorization": f"Bearer {token}", "Accept-Language": "zh"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _refresh_identity_from_admin(session: AuthSession, user: User) -> bool | None:
+    """access token 过期且没有 refresh token 时，用管理员接口确认用户与角色。
+
+    ``True`` 已同步；``False`` 用户被禁用/删除（应结束会话）；``None`` 管理员接口不可用（保留现状）。
+    """
+    owner = str(session.idp_owner or "").strip()
+    profile = _admin_user(owner, user.username)
+    if profile is None:
+        return None
+    if profile.get("isForbidden") or profile.get("isDeleted"):
+        return False
+    claims = dict(profile)
+    claims.setdefault("owner", owner)
+    claims.setdefault("name", profile.get("name") or user.username)
+    _apply_claims(user, claims)
+    return True
+
+
+def _keep_session_with_admin_identity(db: Session, session: AuthSession, user: User) -> bool:
+    """IdP access token 不可用、也没有 refresh token 时，用管理员接口补同步身份。
+
+    保留本站会话（最长 7 天），角色从 IdP 实时读取；用户被禁用/删除则结束会话。
+    """
+    identity = _refresh_identity_from_admin(session, user)
+    if identity is False:
+        _drop_session(db, session)
+        return False
+    session.idp_checked_at = utcnow()
+    db.commit()
+    return True
+
+
 def ensure_idp_session(db: Session, session: AuthSession, user: User) -> bool:
     """校验 IdP 会话；access token 过期时用 refresh token 续期。"""
     if user.idp_issuer == "dev":
@@ -387,26 +439,22 @@ def ensure_idp_session(db: Session, session: AuthSession, user: User) -> bool:
     if not access:
         access = _refresh_session(db, session)
         if not access:
-            _drop_session(db, session)
-            return False
+            return _keep_session_with_admin_identity(db, session, user)
     elif session.idp_token_expires_at and session.idp_token_expires_at <= now + timedelta(seconds=60):
         access = _refresh_session(db, session)
         if not access:
-            _drop_session(db, session)
-            return False
+            return _keep_session_with_admin_identity(db, session, user)
     try:
         claims = fetch_account(access)
     except HTTPException as exc:
         if exc.status_code == 401:
             access = _refresh_session(db, session)
             if not access:
-                _drop_session(db, session)
-                return False
+                return _keep_session_with_admin_identity(db, session, user)
             try:
                 claims = fetch_account(access)
             except HTTPException:
-                _drop_session(db, session)
-                return False
+                return _keep_session_with_admin_identity(db, session, user)
         else:
             # IdP 暂时不可用时不强退本站会话，避免网络抖动导致全员掉线。
             session.idp_checked_at = utcnow()
