@@ -4,8 +4,9 @@ import io
 import time
 from datetime import date
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 
@@ -79,19 +80,34 @@ async def upload_avatar(
             raise HTTPException(status_code=409, detail="reauthorize_required")
         avatar_url = upload_avatar_with_token(access, owner, user.username, content)
         update_user_with_token(access, f"{owner}/{user.username}", "avatar", avatar_url)
+        user.avatar_url = avatar_url
+    else:
+        user.avatar_url = f"/api/account/avatar?v={int(time.time())}"
     target = settings.avatar_path / f"{user.id}.png"
     target.write_bytes(content)
-    user.avatar_url = f"/api/account/avatar?v={int(time.time())}"
     db.commit()
-    return {"avatar_url": user.avatar_url}
+    return {"avatar_url": user_public(user)["avatar_url"]}
 
 
-@router.get("/avatar")
-def get_avatar(user: User = Depends(current_user)) -> FileResponse:
+@router.get("/avatar", response_model=None)
+def get_avatar(user: User = Depends(current_user)) -> FileResponse | RedirectResponse:
     target = settings.avatar_path / f"{user.id}.png"
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="avatar_not_found")
-    return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+    if target.exists():
+        return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+    source = str(user.avatar_url or "")
+    if source.startswith(("http://", "https://")):
+        try:
+            response = httpx.get(source, follow_redirects=True, timeout=12)
+            if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
+                image = Image.open(io.BytesIO(response.content)).convert("RGB")
+                image.thumbnail((512, 512))
+                image.save(target, "PNG")
+                return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+        except Exception:
+            pass
+        # IdP 头像可能要求浏览器会话；镜像失败时退回源地址，由浏览器带 SSO Cookie 取图。
+        return RedirectResponse(source, status_code=302)
+    raise HTTPException(status_code=404, detail="avatar_not_found")
 
 
 @router.post("/password", dependencies=[Depends(require_csrf)])

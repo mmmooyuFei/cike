@@ -2,6 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errorText } from "./api";
 import { useAuth } from "./auth";
 import { LogoMark, Picker, RecordForm, ReviewForm, Sheet } from "./components";
+import {
+  bumpOidcRetry,
+  clearOidcRetry,
+  clearOidcStart,
+  isTransientOidcError,
+  markOidcStart,
+  oidcRetryCount,
+  oidcStartRemainingMs,
+} from "./oidcGuard";
 import { Access } from "./pages/Access";
 import { Account } from "./pages/Account";
 import { Dashboard } from "./pages/Dashboard";
@@ -103,7 +112,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (session.user) sessionStorage.removeItem("cike_skip_auto_login");
+    if (session.user) {
+      sessionStorage.removeItem("cike_skip_auto_login");
+      clearOidcStart();
+      clearOidcRetry();
+    }
   }, [session.user]);
 
   useEffect(() => {
@@ -392,9 +405,12 @@ function Login({
 }) {
   const [error, setError] = useState("");
   const [skipAutoLogin] = useState(() => sessionStorage.getItem("cike_skip_auto_login") === "1");
+  const [fallbackVisible, setFallbackVisible] = useState(false);
+  const [inFlight, setInFlight] = useState(() => oidcStartRemainingMs() !== null);
   const params = new URLSearchParams(window.location.search);
   const loginError = params.get("login_error");
   const provider = mode?.provider_name || "统一登录";
+  const transientError = isTransientOidcError(loginError);
   const loginErrorText: Record<string, string> = {
     oidc_code_expired: "登录凭证已失效，请重新点击登录",
     oidc_state_invalid: "登录状态已过期，请重试",
@@ -402,15 +418,60 @@ function Login({
     oidc_discovery_failed: "无法连接统一登录服务",
   };
   useEffect(() => {
-    if (loginError) setError(loginErrorText[loginError] || `登录失败：${loginError}`);
+    if (!loginError) return;
+    setError(loginErrorText[loginError] || `登录失败：${loginError}`);
+    clearOidcStart();
+    if (!isTransientOidcError(loginError)) clearOidcRetry();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loginError]);
 
-  const autoLogin = Boolean(mode?.auto_login && mode.oidc && !loginError && !skipAutoLogin);
+  useEffect(() => {
+    if (!inFlight) return;
+    const remaining = oidcStartRemainingMs();
+    if (remaining === null) {
+      setInFlight(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setInFlight(false), remaining + 50);
+    return () => window.clearTimeout(timer);
+  }, [inFlight]);
 
   useEffect(() => {
-    if (autoLogin) window.location.replace("/api/auth/oidc/login");
+    if (!loginError || !transientError || oidcRetryCount() >= 2) return;
+    const timer = window.setTimeout(() => {
+      bumpOidcRetry();
+      markOidcStart();
+      window.location.replace("/api/auth/oidc/login");
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [loginError, transientError]);
+
+  const autoLogin = Boolean(
+    mode?.auto_login && mode.oidc && !loginError && !skipAutoLogin && !inFlight,
+  );
+
+  useEffect(() => {
+    if (!autoLogin) {
+      setFallbackVisible(false);
+      return;
+    }
+    const redirectTimer = window.setTimeout(() => {
+      markOidcStart();
+      window.location.replace("/api/auth/oidc/login");
+    }, 300);
+    const fallbackTimer = window.setTimeout(() => setFallbackVisible(true), 2500);
+    return () => {
+      window.clearTimeout(redirectTimer);
+      window.clearTimeout(fallbackTimer);
+    };
   }, [autoLogin]);
+
+  const startLogin = () => {
+    sessionStorage.removeItem("cike_skip_auto_login");
+    clearOidcRetry();
+    markOidcStart();
+    window.location.replace("/api/auth/oidc/login");
+  };
 
   const dev = async (role: "admin" | "user") => {
     setError("");
@@ -425,7 +486,7 @@ function Login({
     return <div className="boot">正在连接登录服务…</div>;
   }
 
-  if (autoLogin) {
+  if (autoLogin && !fallbackVisible) {
     return (
       <div className="login">
         <div className="login-card">
@@ -455,6 +516,7 @@ function Login({
         </div>
         <h1>先记下此刻。</h1>
         <p>待办、日志、睡眠、专注、健身与资金，按天收好；数据只属于登录的人。</p>
+        {inFlight ? <div className="login-error">另一个标签页正在登录，请稍候…</div> : null}
         {error ? <div className="login-error">{error}</div> : null}
         {mode.dev_auth ? (
           <div className="dev-login">
@@ -464,13 +526,9 @@ function Login({
             <div className="tip">生产环境会关闭这个入口，改走统一认证。</div>
           </div>
         ) : mode.oidc ? (
-          <a
-            className="primary btn"
-            href="/api/auth/oidc/login"
-            onClick={() => sessionStorage.removeItem("cike_skip_auto_login")}
-          >
+          <button type="button" className="primary btn" onClick={startLogin}>
             使用 {provider} 登录
-          </a>
+          </button>
         ) : (
           <div className="login-error">未配置登录方式，请检查服务端 OIDC 配置。</div>
         )}

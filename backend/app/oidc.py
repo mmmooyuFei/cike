@@ -329,6 +329,17 @@ def logout_url() -> str:
     return f"{endpoint}{separator}{urlencode(query)}"
 
 
+def _sync_avatar(user: User, claims: dict) -> None:
+    source = str(claims.get("avatar") or claims.get("picture") or "").strip()
+    if not source or source == user.avatar_url:
+        return
+    user.avatar_url = source
+    try:
+        (settings.avatar_path / f"{user.id}.png").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _apply_claims(user: User, claims: dict) -> None:
     roles = _resolved_roles(claims)
     groups = _names(claims.get("groups"))
@@ -338,6 +349,7 @@ def _apply_claims(user: User, claims: dict) -> None:
         role == settings.admin_role or role.rsplit("/", 1)[-1] == settings.admin_role
         for role in roles
     )
+    _sync_avatar(user, claims)
 
 
 def _drop_session(db: Session, session: AuthSession) -> None:
@@ -480,8 +492,7 @@ def upsert_user(db: Session, claims: dict) -> User:
             user.display_name = display_name
         user.email = str(claims.get("email") or "").strip() or user.email
         user.phone = str(claims.get("phone") or "").strip() or user.phone
-        if claims.get("avatar") or claims.get("picture"):
-            user.avatar_url = str(claims.get("avatar") or claims.get("picture"))
+        _sync_avatar(user, claims)
         user.roles = roles
         user.groups = groups
         user.is_admin = is_admin

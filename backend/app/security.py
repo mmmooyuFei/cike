@@ -160,13 +160,20 @@ def require_admin(user: User = Depends(current_user)) -> User:
 
 
 def user_public(user: User) -> dict:
+    local_avatar = settings.avatar_path / f"{user.id}.png"
+    if local_avatar.exists():
+        avatar_url = f"/api/account/avatar?v={int(local_avatar.stat().st_mtime)}"
+    elif user.avatar_url:
+        avatar_url = "/api/account/avatar"
+    else:
+        avatar_url = None
     return {
         "id": user.id,
         "username": user.username,
         "display_name": user.display_name or user.username,
         "email": user.email,
         "phone": user.phone,
-        "avatar_url": user.avatar_url,
+        "avatar_url": avatar_url,
         "gender": user.gender,
         "birthday": user.birthday.isoformat() if user.birthday else None,
         "roles": user.roles or [],
