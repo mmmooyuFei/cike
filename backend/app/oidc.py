@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -15,6 +16,7 @@ from .config import settings
 from .models import OidcState, User, utcnow
 
 _DISCOVERY: dict[str, dict] = {}
+logger = logging.getLogger(__name__)
 
 
 def issuer() -> str:
@@ -110,7 +112,15 @@ def exchange_code(code: str, verifier: str) -> dict:
         response = httpx.post(data["token_endpoint"], data=payload, timeout=15)
         response.raise_for_status()
         token = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "oidc token exchange failed: status=%s body=%s",
+            exc.response.status_code,
+            (exc.response.text or "")[:500],
+        )
+        raise HTTPException(status_code=502, detail="oidc_token_exchange_failed") from exc
     except Exception as exc:
+        logger.warning("oidc token exchange failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(status_code=502, detail="oidc_token_exchange_failed") from exc
     if not token.get("access_token"):
         raise HTTPException(status_code=502, detail="oidc_token_exchange_failed")
