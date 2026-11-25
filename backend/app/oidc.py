@@ -113,11 +113,14 @@ def exchange_code(code: str, verifier: str) -> dict:
         response.raise_for_status()
         token = response.json()
     except httpx.HTTPStatusError as exc:
+        body = (exc.response.text or "")[:500]
         logger.warning(
             "oidc token exchange failed: status=%s body=%s",
             exc.response.status_code,
-            (exc.response.text or "")[:500],
+            body,
         )
+        if "invalid_grant" in body:
+            raise HTTPException(status_code=400, detail="oidc_code_expired") from exc
         raise HTTPException(status_code=502, detail="oidc_token_exchange_failed") from exc
     except Exception as exc:
         logger.warning("oidc token exchange failed: %s: %s", type(exc).__name__, exc)

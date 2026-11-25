@@ -110,6 +110,10 @@ def oidc_callback(
         )
         return response
     except HTTPException as exc:
+        # 授权码只能用一次：浏览器刷新/重放回调时 token 交换会返回 invalid_grant。
+        # 如果本站会话仍然有效，直接回到工作台，不再把用户丢到错误页。
+        if exc.detail in {"oidc_code_expired", "oidc_state_invalid"} and read_session(db, request):
+            return RedirectResponse("/", status_code=303)
         return RedirectResponse(f"/?login_error={exc.detail}", status_code=303)
     except Exception:
         return RedirectResponse("/?login_error=oidc_failed", status_code=303)

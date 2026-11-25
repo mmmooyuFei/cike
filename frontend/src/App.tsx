@@ -379,8 +379,15 @@ function Login({
   const [error, setError] = useState("");
   const params = new URLSearchParams(window.location.search);
   const loginError = params.get("login_error");
+  const loginErrorText: Record<string, string> = {
+    oidc_code_expired: "登录凭证已失效，请重新点击登录",
+    oidc_state_invalid: "登录状态已过期，请重试",
+    oidc_token_exchange_failed: "登录服务暂时不可用，请重试",
+    oidc_discovery_failed: "无法连接统一登录服务",
+  };
   useEffect(() => {
-    if (loginError) setError(`登录失败：${loginError}`);
+    if (loginError) setError(loginErrorText[loginError] || `登录失败：${loginError}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loginError]);
 
   const dev = async (role: "admin" | "user") => {
