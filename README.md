@@ -167,11 +167,17 @@ bash scripts/update.sh
 - 写请求校验 CSRF；删除为软删除并支持撤销。
 - 管理接口仅对 `ADMIN_ROLE` 角色开放。
 
+## 数据库
+
+表与字段说明见 [docs/数据库表结构.md](docs/数据库表结构.md)。表在容器启动时自动创建；
+目前共 15 张表（5 张系统表 + 10 张业务表），业务数据按 `user_id` 隔离，删除为软删除。
+
 ## 目录
 
 ```
 backend/                 FastAPI 应用、模型、路由、测试
 frontend/                React + Vite 前端
+docs/数据库表结构.md      表、字段、约束与常用查询
 scripts/update.sh        生产更新与回滚
 scripts/1panel-site.sh   1Panel 8443 站点生成
 .github/workflows/       GitHub → CNB 镜像
