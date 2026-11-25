@@ -143,18 +143,11 @@ bash scripts/update.sh
 - 运行版本：镜像构建时写入的提交号与部署方式
 - 仓库状态：分支 / 当前提交 / 提交时间 / 未提交改动 / 远端地址（不含凭据）
 - 最近提交，以及当前运行提交是否与仓库 HEAD 一致
+- 「检查远端」「拉取更新」：`docker-compose.yml` 已把项目目录挂到容器 `/repo`（`UPDATE_REPO_DIR=/repo`），页面可以直接执行 `git fetch` / `git pull --ff-only`
 
-容器里默认没有仓库，因此只展示运行版本。需要在线「检查远端 / 拉取更新」时，在 `docker-compose.yml` 挂载仓库并设置环境变量：
+页面上的「拉取更新」只更新仓库；重建镜像与健康检查仍走 `scripts/update.sh`。不想让页面拉代码时，把挂载改成 `./:/repo:ro` 即可（页面会显示“只读挂载”，只能看提交）。
 
-```yaml
-    volumes:
-      - ./data:/app/data
-      - ./:/repo:rw
-    environment:
-      UPDATE_REPO_DIR: /repo
-```
-
-页面上的「拉取更新」只执行 `git pull --ff-only`；重建镜像与健康检查仍走 `scripts/update.sh`。「重启服务」默认关闭，需要 `UPDATE_ALLOW_RESTART=true` 且容器有 `restart` 策略。
+「重启服务」默认关闭，需要 `UPDATE_ALLOW_RESTART=true` 且容器有 `restart` 策略。
 
 ## CNB 镜像
 

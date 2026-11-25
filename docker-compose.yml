@@ -12,12 +12,14 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       PORT: 9543
       DATA_DIR: /app/data
+      # 「更新管理」读取的仓库目录（下面的 ./:/repo 挂载）
+      UPDATE_REPO_DIR: /repo
     ports:
       - "127.0.0.1:9543:9543"
     volumes:
       - ./data:/app/data
-      # 可选：挂载仓库后「更新管理」才能检查远端 / 拉取更新（见 README）
-      # - ./:/repo:rw
+      # 把项目仓库挂进容器：更新管理可查看分支/提交、检查远端、git pull
+      - ./:/repo
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9543/api/health')"]
       interval: 30s
