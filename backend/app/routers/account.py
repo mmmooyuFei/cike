@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import time
 from datetime import date
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
@@ -95,22 +96,37 @@ async def upload_avatar(
     return {"avatar_url": user_public(user)["avatar_url"]}
 
 
+def mirror_remote_avatar(source: str, target: Path) -> bool:
+    """把 IdP 头像镜像成本地 PNG，保留 alpha；失败返回 False。"""
+    try:
+        response = httpx.get(source, follow_redirects=True, timeout=12)
+        if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
+            return False
+        image = Image.open(io.BytesIO(response.content)).convert("RGBA")
+        image.thumbnail((512, 512))
+        image.save(target, "PNG")
+        return True
+    except Exception:
+        return False
+
+
 @router.get("/avatar", response_model=None)
 def get_avatar(user: User = Depends(current_user)) -> FileResponse | RedirectResponse:
     target = settings.avatar_path / f"{user.id}.png"
-    if target.exists():
-        return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
     source = str(user.avatar_url or "")
-    if source.startswith(("http://", "https://")):
-        try:
-            response = httpx.get(source, follow_redirects=True, timeout=12)
-            if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
-                image = Image.open(io.BytesIO(response.content)).convert("RGBA")
-                image.thumbnail((512, 512))
-                image.save(target, "PNG")
-                return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
-        except Exception:
-            pass
+    remote = source.startswith(("http://", "https://"))
+    if target.exists():
+        # 旧版本把透明头像压成了 RGB 黑底；有远端源图时自愈一次。
+        if remote:
+            try:
+                if Image.open(target).mode != "RGBA":
+                    mirror_remote_avatar(source, target)
+            except Exception:
+                pass
+        return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+    if remote:
+        if mirror_remote_avatar(source, target):
+            return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
         # IdP 头像可能要求浏览器会话；镜像失败时退回源地址，由浏览器带 SSO Cookie 取图。
         return RedirectResponse(source, status_code=302)
     raise HTTPException(status_code=404, detail="avatar_not_found")

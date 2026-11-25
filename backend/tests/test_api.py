@@ -282,6 +282,47 @@ def test_habits_validation_and_permission(client):
     assert client.get("/api/habits").status_code == 403
 
 
+def test_legacy_avatar_cache_repaired(client, monkeypatch):
+    """旧版本留下的 RGB 黑底缓存，有远端源图时应自动镜像回 RGBA。"""
+    headers = login(client)
+    transparent = Image.new("RGBA", (16, 16), (255, 0, 0, 0))
+    transparent.putpixel((0, 0), (30, 81, 56, 255))
+    buffer = BytesIO()
+    transparent.save(buffer, "PNG")
+    payload = buffer.getvalue()
+    uploaded = client.post(
+        "/api/account/avatar",
+        files={"file": ("avatar.png", payload, "image/png")},
+        headers=headers,
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+    user_id = client.get("/api/auth/session").json()["user"]["id"]
+    from app.config import settings
+    from app.db import SessionLocal
+    from app.models import User
+
+    target = settings.avatar_path / f"{user_id}.png"
+    Image.new("RGB", (16, 16), (0, 0, 0)).save(target, "PNG")
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        user.avatar_url = "https://idp.example.test/avatar.png"
+        db.commit()
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = payload
+
+    monkeypatch.setattr("app.routers.account.httpx.get", lambda *args, **kwargs: FakeResponse())
+    served = client.get("/api/account/avatar")
+    assert served.status_code == 200
+    image = Image.open(BytesIO(served.content))
+    assert image.mode == "RGBA"
+    assert image.getpixel((8, 8))[3] == 0
+
+
 def test_update_status_admin_only(client):
     user = login(client)
     assert client.get("/api/update/status").status_code == 403
