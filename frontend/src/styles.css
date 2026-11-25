@@ -115,8 +115,6 @@ a.btn {
 .nav-item .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.4; flex: 0 0 5px; }
 .nav-item.on { background: #f3f0e4; color: #16241c; font-weight: 600; }
 .nav-item.on .dot { opacity: 0.55; background: var(--gold); }
-.nav-foot { margin-top: auto; font-size: 11px; color: #8c9a90; display: flex; align-items: center; gap: 6px; padding: 0 8px; }
-.pulse { width: 6px; height: 6px; border-radius: 50%; background: #4fae82; display: block; flex: 0 0 6px; }
 .account-chip {
   display: flex; align-items: center; gap: 9px; background: transparent; border: 1px solid #2b4033;
   border-radius: 9px; padding: 8px 9px; color: #dbe4dc; text-align: left; width: 100%;

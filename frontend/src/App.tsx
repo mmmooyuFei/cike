@@ -240,15 +240,11 @@ export default function App() {
             </div>
           ))}
         </nav>
-        <div className="nav-foot">
-          <span className="pulse" />
-          <span>{session.is_admin ? "站点管理员" : "个人账号"}</span>
-        </div>
         <button type="button" className="account-chip" onClick={() => go("account")} title="账号设置">
           <Avatar className="avatar" src={session.user.avatar_url} name={session.user.display_name} />
           <span>
             {session.user.display_name}
-            <small>{session.user.username}</small>
+            <small>{session.is_admin ? "站点管理员" : "个人账号"}</small>
           </span>
         </button>
       </aside>
