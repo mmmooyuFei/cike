@@ -75,6 +75,8 @@ bash scripts/1panel-site.sh
 
 `CERT_SOURCE` 是包含 `ssl/fullchain.pem` 与 `ssl/privkey.pem` 的站点目录。脚本会生成 8443 server 配置、校验并热加载 OpenResty；改动前会备份原配置。
 
+> 如果站点需要在 1Panel 的「网站」列表中管理，请在 1Panel 中创建反向代理站点并选择已有通配证书；本脚本只生成 OpenResty 配置，不写入 1Panel 数据库。
+
 ### 5. Casdoor
 
 在目标组织下创建应用：
