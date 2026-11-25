@@ -35,7 +35,14 @@ class Settings(BaseSettings):
     casdoor_application: str = ""
 
     brand_default_name: str = "此刻"
+    brand_default_subtitle: str = "笔记 · 备忘录"
+    app_timezone: str = "Asia/Shanghai"
     data_dir: str = "data"
+
+    # 更新管理：``app_git_commit`` 由构建参数写入；``update_repo_dir`` 挂载仓库后才可在线拉取
+    app_git_commit: str = ""
+    update_repo_dir: str = ""
+    update_allow_restart: bool = False
 
     @property
     def data_path(self) -> Path:

@@ -11,6 +11,7 @@ from .security import current_user, is_admin
 MODULES: list[dict[str, str]] = [
     {"key": "dashboard", "label": "驾驶舱"},
     {"key": "todos", "label": "待办"},
+    {"key": "habits", "label": "坚持打卡"},
     {"key": "milestones", "label": "里程碑"},
     {"key": "daily", "label": "每日日志"},
     {"key": "sleep", "label": "睡眠"},
@@ -23,6 +24,9 @@ MODULE_KEYS = {item["key"] for item in MODULES}
 
 def subject_pairs(user: User) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = [("user", user.id)]
+    if user.username:
+        # 权限页对“具体用户”使用 username，这里两种都认，避免规则静默失效
+        pairs.append(("user", user.username))
     for role in user.roles or []:
         pairs.append(("role", str(role)))
     for group in user.groups or []:

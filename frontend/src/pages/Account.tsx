@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "../api";
 import { useAuth } from "../auth";
-import { LogoMark, MODULE_LABELS } from "../components";
+import { Avatar, LogoMark, MODULE_LABELS } from "../components";
 import type { AppContextValue } from "../types";
 
 export function Account({ ctx }: { ctx: AppContextValue }) {
@@ -14,6 +14,7 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
   const [password, setPassword] = useState({ old: "", next: "", confirm: "" });
   const [passwordReady, setPasswordReady] = useState(false);
   const [brandName, setBrandName] = useState(ctx.brand.name);
+  const [brandSubtitle, setBrandSubtitle] = useState(ctx.brand.subtitle);
   const [brandSaving, setBrandSaving] = useState(false);
   const avatarInput = useRef<HTMLInputElement>(null);
   const logoInput = useRef<HTMLInputElement>(null);
@@ -26,7 +27,8 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
 
   useEffect(() => {
     setBrandName(ctx.brand.name);
-  }, [ctx.brand.name]);
+    setBrandSubtitle(ctx.brand.subtitle);
+  }, [ctx.brand.name, ctx.brand.subtitle]);
 
   useEffect(() => {
     api
@@ -50,6 +52,10 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
 
   const uploadAvatar = async (file: File | undefined) => {
     if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      ctx.toast("头像图片超过 5MB");
+      return;
+    }
     try {
       await api.upload("/account/avatar", file);
       ctx.toast("头像已更新");
@@ -60,9 +66,14 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
   };
 
   const saveBrand = async () => {
+    const name = brandName.trim();
+    if (!name) {
+      ctx.toast("站点名称不能为空");
+      return;
+    }
     setBrandSaving(true);
     try {
-      await api.put("/settings/brand", { name: brandName.trim() || "此刻" });
+      await api.put("/settings/brand", { name, subtitle: brandSubtitle.trim() });
       ctx.toast("品牌已保存");
       ctx.refresh();
     } catch (error) {
@@ -74,6 +85,10 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
 
   const uploadLogo = async (file: File | undefined) => {
     if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      ctx.toast("LOGO 图片超过 2MB");
+      return;
+    }
     try {
       await api.upload("/settings/brand/logo", file);
       ctx.toast("LOGO 已更新");
@@ -86,6 +101,10 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
   const changePassword = async () => {
     if (!password.old || !password.next) {
       ctx.toast("请填写当前密码与新密码");
+      return;
+    }
+    if (password.next.length < 12) {
+      ctx.toast("新密码至少 12 位");
       return;
     }
     if (password.next !== password.confirm) {
@@ -116,14 +135,11 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
         <div className="panel-body">
           <div className="profile-row">
             <div className="avatar-side">
-              {user.avatar_url ? (
-                <img className="avatar-big" src={user.avatar_url} alt={displayName} />
-              ) : (
-                <div className="avatar-big">{(displayName || "此").slice(0, 1)}</div>
-              )}
+              <Avatar className="avatar-big" src={user.avatar_url} name={displayName} />
               <button type="button" className="link" onClick={() => avatarInput.current?.click()}>
                 更换头像
               </button>
+              <div className="field-hint avatar-hint">支持透明底 PNG</div>
               <input
                 ref={avatarInput}
                 type="file"
@@ -166,7 +182,6 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
               </div>
             </div>
           </div>
-          <div className="note">用户名、手机号、邮箱由 Casdoor 统一身份托管；本页只展示，不代写。头像与显示名保存在本站。</div>
         </div>
       </section>
 
@@ -175,7 +190,7 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
           <div className="panel-head">
             <div>
               <h3>品牌与外观</h3>
-              <div className="sub">左上角名称与 LOGO · 默认“此刻”</div>
+              <div className="sub">左上角名称、副标题与 LOGO</div>
             </div>
           </div>
           <div className="panel-body">
@@ -183,8 +198,8 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
               <div className="brand-preview">
                 {ctx.brand.logo_url ? <img className="brand-logo" src={ctx.brand.logo_url} alt="" /> : <LogoMark size={38} />}
                 <div>
-                  <b>{ctx.brand.name}</b>
-                  <small>个人工作台</small>
+                  <b>{brandName || "此刻"}</b>
+                  {brandSubtitle ? <small>{brandSubtitle}</small> : null}
                 </div>
               </div>
               <div className="brand-fields">
@@ -193,26 +208,48 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
                   <input id="brand-name" value={brandName} maxLength={12} onChange={(event) => setBrandName(event.target.value)} />
                 </div>
                 <div className="field">
+                  <label htmlFor="brand-subtitle">副标题</label>
+                  <input
+                    id="brand-subtitle"
+                    value={brandSubtitle}
+                    maxLength={24}
+                    placeholder="笔记 · 备忘录"
+                    onChange={(event) => setBrandSubtitle(event.target.value)}
+                  />
+                </div>
+                <div className="field">
                   <label>LOGO</label>
-                  <div className="btn-row">
-                    <button type="button" onClick={() => logoInput.current?.click()}>上传图片</button>
-                    <button type="button" onClick={() => setBrandName("此刻")}>恢复默认名称</button>
-                  </div>
+                  <button type="button" className="file-btn" onClick={() => logoInput.current?.click()}>
+                    上传图片
+                  </button>
                   <input
                     ref={logoInput}
                     type="file"
-                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    accept="image/png,image/jpeg,image/webp"
                     hidden
                     onChange={(event) => {
                       void uploadLogo(event.target.files?.[0]);
                       event.target.value = "";
                     }}
                   />
-                  <div className="field-hint">PNG / JPG / SVG，建议方形，≤2MB</div>
                 </div>
-                <button type="button" className="primary" onClick={() => void saveBrand()} disabled={brandSaving}>
-                  {brandSaving ? "保存中…" : "保存品牌"}
-                </button>
+              </div>
+              <div className="brand-actions">
+                <div className="field-hint">LOGO 用 PNG / JPG / WebP，建议方形，≤2MB；透明底 PNG 会保留透明</div>
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBrandName(ctx.brand.default_name || "此刻");
+                      setBrandSubtitle(ctx.brand.default_subtitle || "笔记 · 备忘录");
+                    }}
+                  >
+                    恢复默认
+                  </button>
+                  <button type="button" className="primary" onClick={() => void saveBrand()} disabled={brandSaving}>
+                    {brandSaving ? "保存中…" : "保存品牌"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -262,13 +299,7 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
         <div className="panel-body">
           <div className="role-line">
             <span>当前身份</span>
-            <span className="role-pill">{ctx.session.is_admin ? "站点管理员" : "个人用户"}</span>
-            {user.roles.map((role) => (
-              <span className="role-pill soft" key={role}>{role}</span>
-            ))}
-            {user.groups.map((group) => (
-              <span className="role-pill soft" key={group}>{group}</span>
-            ))}
+            <span className="role-pill">{ctx.session.is_admin ? "站点管理员" : "个人账号"}</span>
           </div>
           <div className="perm-grid">
             <div>
@@ -303,7 +334,6 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
             <a className="btn" href="/api/export/todos.csv" download>导出待办 CSV</a>
             <button type="button" onClick={() => void logout()}>退出登录</button>
           </div>
-          <div className="note">生产环境为 Casdoor OIDC 会话；本地开发为身份切换器。导出只包含当前用户的数据。</div>
         </div>
       </section>
     </div>

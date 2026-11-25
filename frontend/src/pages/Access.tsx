@@ -63,6 +63,8 @@ export function Access({ ctx }: { ctx: AppContextValue }) {
   const subjects =
     form.subject_type === "role" ? data.roles : form.subject_type === "group" ? data.groups : data.users.map((user) => user.username);
 
+  const moduleLabel = (key: string) => data.modules.find((entry) => entry.key === key)?.label || key;
+
   const add = () => {
     if (!form.subject) {
       ctx.toast("请选择角色、群组或用户");
@@ -74,7 +76,14 @@ export function Access({ ctx }: { ctx: AppContextValue }) {
     setRules([...next, { ...form }]);
   };
 
+  const editRule = (rule: Rule) => {
+    setForm({ ...rule });
+    setRules(rules.filter((item) => item !== rule));
+    ctx.toast("已载入表单，改完点「加入规则」");
+  };
+
   const save = async () => {
+    if (!window.confirm(`保存会用下面 ${rules.length} 条规则整体替换站点权限，确定继续？`)) return;
     setSaving(true);
     try {
       await api.put("/access", { rules });
@@ -157,15 +166,20 @@ export function Access({ ctx }: { ctx: AppContextValue }) {
                 <div className="panel row-panel" key={`${rule.module}-${rule.subject_type}-${rule.subject}`}>
                   <div className="row-copy">
                     <div className="t">{rule.subject_type === "role" ? "角色" : rule.subject_type === "group" ? "群组" : "用户"} · {rule.subject}</div>
-                    <div className="s">模块 {rule.module} · 查看 {rule.can_view ? "允许" : "拒绝"} · 编辑 {rule.can_edit ? "允许" : "拒绝"}</div>
+                    <div className="s">
+                      模块 {moduleLabel(rule.module)} · 查看 {rule.can_view ? "允许" : "拒绝"} · 编辑 {rule.can_edit ? "允许" : "拒绝"}
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    className="ghost danger-text"
-                    onClick={() => setRules(rules.filter((item) => item !== rule))}
-                  >
-                    移除
-                  </button>
+                  <div className="row-actions">
+                    <button type="button" className="ghost" onClick={() => editRule(rule)}>编辑</button>
+                    <button
+                      type="button"
+                      className="ghost danger-text"
+                      onClick={() => setRules(rules.filter((item) => item !== rule))}
+                    >
+                      移除
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import DailyLog, FocusSession, Milestone, MoneyRecord, SleepRecord, Todo, User, WeeklyReview, Workout
 from ..permissions import module_guard
+from ..routers.habits import habit_summaries
 from ..routers.modules import serialize
+from ..timeutil import app_today
 
 router = APIRouter(prefix="/api", tags=["overview"])
 
@@ -23,7 +25,7 @@ def overview(
     user: User = Depends(module_guard("dashboard")),
     db: Session = Depends(get_db),
 ) -> dict:
-    today = date.today()
+    today = app_today()
     monday = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     week_ago = today - timedelta(days=6)
@@ -129,6 +131,13 @@ def overview(
         }
         for item in sorted(latest_money, key=lambda item: item.account)
     ]
+    by_month: dict[date, dict[str, float]] = {}
+    for item in money:
+        by_month.setdefault(item.month, {})[item.account] = float(item.closing or 0)
+    finance_trend = [
+        {"month": month.isoformat()[:7], "total": round(sum(values.values()), 2), "accounts": len(values)}
+        for month, values in sorted(by_month.items())
+    ][-6:]
 
     milestones = list(
         db.scalars(
@@ -164,6 +173,7 @@ def overview(
             "focus_7_minutes": sum(item.minutes or 0 for item in focus),
             "focus_week_sessions": len(focus_week),
             "wake_days": wake_days,
+            "wake_hits": wake_hits,
             "wake_rate": round(wake_hits / wake_days * 100) if wake_days else None,
             "sleep_avg_7": round(sum(sleep_hours) / len(sleep_hours), 1) if sleep_hours else None,
             "workout_month_count": len(workouts),
@@ -174,13 +184,21 @@ def overview(
             "money_accounts": len(money_accounts),
             "milestone_open": len(active_milestones),
             "milestone_done": len(done_milestones),
+            "milestone_total": total_milestones,
             "milestone_rate": milestone_rate,
         },
         "focus_trend": focus_trend,
         "sleep_trend": sleep_trend,
         "todos": [serialize(item) for item in top_todos],
         "money_accounts": money_accounts,
+        "finance_trend": finance_trend,
         "milestones": [serialize(item) for item in active_milestones[:3]],
+        "today_focus": [
+            {"id": item.id, "item": item.item, "type": item.type, "minutes": item.minutes}
+            for item in sorted(focus_today, key=lambda item: item.created_at)
+        ],
+        "habits": habit_summaries(db, user, today, active_only=True),
+        "today_sleep": serialize(by_day.get(today)) if by_day.get(today) else None,
         "today_log": serialize(today_log) if today_log else None,
         "review": serialize(review) if review else None,
     }

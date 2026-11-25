@@ -16,6 +16,8 @@ services:
       - "127.0.0.1:9543:9543"
     volumes:
       - ./data:/app/data
+      # 可选：挂载仓库后「更新管理」才能检查远端 / 拉取更新（见 README）
+      # - ./:/repo:rw
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9543/api/health')"]
       interval: 30s

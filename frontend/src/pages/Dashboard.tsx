@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api";
-import type { AppContextValue, Overview } from "../types";
+import type { AppContextValue, HabitItem, Overview, RecordItem } from "../types";
 
 function fmtMinutes(minutes: number): { value: string; unit: string } {
   if (minutes < 60) return { value: String(minutes), unit: "分钟" };
@@ -12,10 +12,19 @@ function weekday(day: string): string {
   return names[new Date(`${day}T00:00:00`).getDay()];
 }
 
+function daysLeft(target: unknown, today: string): number | null {
+  if (!target) return null;
+  const diff = (new Date(`${String(target).slice(0, 10)}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime()) / 86400000;
+  return Number.isFinite(diff) ? Math.round(diff) : null;
+}
+
 export function Dashboard({ ctx }: { ctx: AppContextValue }) {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [busyTodo, setBusyTodo] = useState<number | null>(null);
+  const [punching, setPunching] = useState(false);
+  const [busyHabit, setBusyHabit] = useState<number | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -35,24 +44,93 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
   }, [ctx.refreshKey]);
 
   const toggle = async (id: number, done: boolean) => {
+    if (busyTodo !== null) return;
+    setBusyTodo(id);
     try {
       await api.post(`/data/todos/${id}/toggle`, { done: !done });
       ctx.toast(done ? "已恢复为未完成" : "已完成");
       ctx.refresh();
     } catch (err) {
       ctx.toast(errorText(err));
+    } finally {
+      setBusyTodo(null);
     }
   };
 
   const punch = async (kind: "wake" | "sleep") => {
+    if (punching) return;
+    setPunching(true);
     try {
       const now = new Date();
       const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      const result = await api.post<{ shifted: boolean }>("/data/sleep/punch", { kind, time });
-      ctx.toast(kind === "wake" ? `起床打卡 ${time}` : result.shifted ? `睡前打卡 ${time} · 已记到昨天` : `睡前打卡 ${time}`);
+      const result = await api.post<{ shifted: boolean; achieved: boolean; item?: { hours?: number } }>("/data/sleep/punch", {
+        kind,
+        time,
+      });
+      const hours = result.item?.hours;
+      const detail =
+        kind === "wake"
+          ? `${result.achieved ? "达标" : "未达标"}${hours ? ` · 睡了 ${hours} 小时` : ""}`
+          : result.shifted
+            ? "已记到昨天"
+            : "已记录";
+      ctx.toast(`${kind === "wake" ? "起床" : "睡前"}打卡 ${time} · ${detail}`);
       ctx.refresh();
     } catch (err) {
       ctx.toast(errorText(err));
+    } finally {
+      setPunching(false);
+    }
+  };
+
+  const openMoney = async () => {
+    try {
+      const { items } = await api.get<{ items: RecordItem[] }>("/data/money");
+      const month = (data?.today || "").slice(0, 7);
+      const sameMonth = items.filter((row) => String(row.month).slice(0, 7) === month);
+      const existing = sameMonth.find((row) => row.account === "支付宝") || sameMonth[0];
+      ctx.openForm("money", existing || { account: "支付宝", month: `${month}-01` });
+    } catch {
+      ctx.openForm("money");
+    }
+  };
+
+  const quickOpen = (key: string) => {
+    if (key === "daily" && data?.today_log) {
+      ctx.openForm("daily", data.today_log);
+      return;
+    }
+    if (key === "sleep" && data?.today_sleep) {
+      ctx.openForm("sleep", data.today_sleep);
+      return;
+    }
+    if (key === "habits") {
+      ctx.go("habits");
+      return;
+    }
+    if (key === "money") {
+      void openMoney();
+      return;
+    }
+    ctx.openForm(key);
+  };
+
+  const toggleHabit = async (habit: HabitItem) => {
+    if (busyHabit !== null) return;
+    setBusyHabit(habit.id);
+    try {
+      if (habit.today_done) {
+        await api.del(`/habits/${habit.id}/check?date=${data?.today || ""}`);
+        ctx.toast("已取消今日打卡");
+      } else {
+        await api.post(`/habits/${habit.id}/check`, {});
+        ctx.toast(`「${habit.title}」今日打卡 ✓`);
+      }
+      ctx.refresh();
+    } catch (err) {
+      ctx.toast(errorText(err));
+    } finally {
+      setBusyHabit(null);
     }
   };
 
@@ -83,6 +161,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
   const todayFocus = fmtMinutes(kpi.focus_today_minutes);
   const study = fmtMinutes(kpi.study_month_minutes);
   const maxFocus = Math.max(...data.focus_trend.map((item) => item.minutes), 1);
+  const maxMoney = Math.max(...data.finance_trend.map((item) => item.total), 1);
   const empty =
     kpi.todo_open + kpi.focus_7_minutes + kpi.wake_days + kpi.workout_month_count + kpi.study_month_minutes + kpi.milestone_open === 0;
 
@@ -132,7 +211,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
         <div className="kpi">
           <div className="label">起床达标</div>
           <div className="value">
-            {kpi.wake_days ? `${Math.round(((kpi.wake_rate || 0) * kpi.wake_days) / 100)}/${kpi.wake_days}` : "0/0"}
+            {kpi.wake_hits}/{kpi.wake_days}
             <span>天</span>
           </div>
           <div className="hint">{kpi.wake_rate == null ? "还没有打卡" : `${kpi.wake_rate}% 达标`}</div>
@@ -194,6 +273,87 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
           <section className="panel">
             <div className="panel-head">
               <div>
+                <h3>今日坚持</h3>
+                <div className="sub">
+                  {data.habits.length
+                    ? `今天 ${data.habits.filter((habit) => habit.today_done).length} / ${data.habits.length} 件`
+                    : "还没有坚持事项"}
+                </div>
+              </div>
+              <button type="button" className="link" onClick={() => ctx.go("habits")}>
+                坚持打卡 →
+              </button>
+            </div>
+            <div className="panel-body">
+              {data.habits.length === 0 ? (
+                <div className="empty small">
+                  <b>还没有坚持事项</b>
+                  <p>点右上角「坚持打卡」去加一件想长期坚持的事。</p>
+                </div>
+              ) : (
+                data.habits.map((habit) => (
+                  <div className="row-item" key={habit.id}>
+                    <div className="row-copy">
+                      <div className="t">{habit.title}</div>
+                      <div className="s">
+                        {habit.month_done} / {habit.month_goal} 天{habit.streak ? ` · 连续 ${habit.streak} 天` : ""}
+                      </div>
+                      <div className="prog">
+                        <i style={{ width: `${Math.min(100, Math.max(0, habit.progress))}%` }} />
+                      </div>
+                    </div>
+                    <div className="row-actions">
+                      <span className={`tag ${habit.today_done ? "ok" : "warn"}`}>{habit.today_done ? "已打卡" : "未打卡"}</span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={busyHabit !== null}
+                        onClick={() => void toggleHabit(habit)}
+                      >
+                        {habit.today_done ? "取消" : "打卡"}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h3>今天在专注什么</h3>
+                <div className="sub">
+                  {data.today_focus.length ? `${data.today_focus.length} 段 · 合计 ${todayFocus.value} ${todayFocus.unit}` : "今天还没有专注记录"}
+                </div>
+              </div>
+              <button type="button" className="link" onClick={() => ctx.openForm("focus")}>
+                记一段 →
+              </button>
+            </div>
+            <div className="panel-body">
+              {data.today_focus.length === 0 ? (
+                <div className="empty small">
+                  <b>今天还没有专注记录</b>
+                  <p>一段一记，45 分钟起算；学到的顺手写一句收获。</p>
+                </div>
+              ) : (
+                data.today_focus.map((item) => (
+                  <div className="fin-row" key={item.id}>
+                    <span className="acct">
+                      <i>{item.type.slice(0, 1)}</i>
+                      {item.item}
+                    </span>
+                    <b className="muted">{item.minutes} 分钟</b>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <div>
                 <h3>今天要做</h3>
                 <div className="sub">{kpi.todo_open} 件未完成 · 按截止日期排列</div>
               </div>
@@ -216,6 +376,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
                         type="button"
                         className={`check ${done ? "on" : ""}`}
                         aria-label={done ? "标记未完成" : "标记完成"}
+                        disabled={busyTodo !== null}
                         onClick={() => void toggle(Number(todo.id), done)}
                       >
                         ✓
@@ -274,7 +435,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
                 <h3>资金</h3>
                 <div className="sub">{kpi.money_month || "本月"} · {kpi.money_accounts} 个账户</div>
               </div>
-              <button type="button" className="link" onClick={() => ctx.openForm("money")}>
+              <button type="button" className="link" onClick={() => void openMoney()}>
                 记这个月 →
               </button>
             </div>
@@ -290,6 +451,20 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
                     <b>¥{(kpi.money_total ?? 0).toLocaleString("zh-CN")}</b>
                     <span>期末合计</span>
                   </div>
+                  {data.finance_trend.length > 1 ? (
+                    <div className="chart mini">
+                      {data.finance_trend.map((point) => (
+                        <div className="bar-col" key={point.month}>
+                          <div
+                            className="bar"
+                            style={{ height: `${point.total > 0 ? Math.max(8, Math.round((point.total / maxMoney) * 100)) : 4}%` }}
+                            title={`${point.month} · ¥${point.total.toLocaleString("zh-CN")} · ${point.accounts} 个账户`}
+                          />
+                          <div className="bar-label">{point.month.slice(5)} 月</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   {data.money_accounts.slice(0, 4).map((item) => (
                     <div className="fin-row" key={item.account}>
                       <span className="acct">
@@ -311,9 +486,11 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
             <div className="panel-head">
               <div>
                 <h3>年度里程碑</h3>
-                <div className="sub">{kpi.milestone_open} 件进行中</div>
+                <div className="sub">
+                  {kpi.milestone_done}/{kpi.milestone_total} 已完成 · {kpi.milestone_open} 件进行中
+                </div>
               </div>
-              <button type="button" className="link" onClick={() => ctx.openForm("milestones")}>
+              <button type="button" className="link" onClick={() => ctx.go("milestones")}>
                 全部 →
               </button>
             </div>
@@ -324,18 +501,22 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
                   <p>只写真正在乎的，五件起。</p>
                 </div>
               ) : (
-                data.milestones.map((item) => (
-                  <div className="row-item" key={String(item.id)}>
-                    <div className="row-copy">
-                      <div className="t">{String(item.title)}</div>
-                      <div className="s">{String(item.metric || item.next_step || "还没有下一步")}</div>
-                      <div className="prog">
-                        <i style={{ width: `${Number(item.progress || 0)}%` }} />
+                data.milestones.map((item) => {
+                  const left = daysLeft(item.target_date, data.today);
+                  const leftText = left === null ? "" : left < 0 ? ` · 超期 ${Math.abs(left)} 天` : ` · 剩 ${left} 天`;
+                  return (
+                    <div className="row-item" key={String(item.id)}>
+                      <div className="row-copy">
+                        <div className="t">{String(item.title)}{leftText}</div>
+                        <div className="s">{String(item.metric || item.next_step || "还没有下一步")}</div>
+                        <div className="prog">
+                          <i style={{ width: `${Math.min(100, Math.max(0, Number(item.progress || 0)))}%` }} />
+                        </div>
                       </div>
+                      <span className="tag">{Number(item.progress || 0)}%</span>
                     </div>
-                    <span className="tag">{Number(item.progress || 0)}%</span>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </section>
@@ -359,6 +540,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
       <div className="quick-row">
         {[
           ["todos", "☷", "待办"],
+          ["habits", "◈", "坚持打卡"],
           ["focus", "◷", "专注"],
           ["daily", "✎", "日志"],
           ["sleep", "◒", "睡眠"],
@@ -366,7 +548,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
           ["milestones", "◇", "里程碑"],
           ["money", "¥", "月度余额"],
         ].map(([key, icon, label]) => (
-          <button type="button" key={key} onClick={() => ctx.openForm(key)}>
+          <button type="button" key={key} onClick={() => quickOpen(key)}>
             {icon} {label}
           </button>
         ))}

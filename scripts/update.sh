@@ -33,7 +33,7 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 info "构建镜像"
-docker compose build || fail "build_failed"
+docker compose build --build-arg GIT_COMMIT="$(git rev-parse --short HEAD)" || fail "build_failed"
 
 info "重建容器"
 docker compose up -d || fail "compose_up_failed"

@@ -21,7 +21,12 @@ MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
 
 @router.patch("/profile", dependencies=[Depends(require_csrf)])
-def update_profile(payload: dict, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def update_profile(
+    payload: dict,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     display_name = str(payload.get("display_name") or "").strip()
     if not display_name or len(display_name) > 40:
         raise HTTPException(status_code=422, detail="invalid_display_name")
@@ -56,6 +61,7 @@ def update_profile(payload: dict, user: User = Depends(current_user), db: Sessio
 @router.post("/avatar", dependencies=[Depends(require_csrf)])
 async def upload_avatar(
     file: UploadFile,
+    request: Request,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -63,9 +69,9 @@ async def upload_avatar(
     if not data or len(data) > MAX_AVATAR_BYTES:
         raise HTTPException(status_code=413, detail="avatar_too_large")
     try:
-        image = Image.open(io.BytesIO(data))
-        image = ImageOps.exif_transpose(image)
-        image = image.convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+        # 保留 alpha 通道：透明底头像不要被压成黑底
+        image = image.convert("RGBA")
         image.thumbnail((512, 512))
         buffer = io.BytesIO()
         image.save(buffer, "PNG")
@@ -99,7 +105,7 @@ def get_avatar(user: User = Depends(current_user)) -> FileResponse | RedirectRes
         try:
             response = httpx.get(source, follow_redirects=True, timeout=12)
             if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
-                image = Image.open(io.BytesIO(response.content)).convert("RGB")
+                image = Image.open(io.BytesIO(response.content)).convert("RGBA")
                 image.thumbnail((512, 512))
                 image.save(target, "PNG")
                 return FileResponse(target, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
@@ -145,4 +151,5 @@ def capabilities(user: User = Depends(current_user)) -> dict:
         "gender": True,
         "birthday": True,
         "admin": is_admin(user),
+        "profile_sync": not settings.dev_auth,
     }

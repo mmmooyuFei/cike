@@ -19,7 +19,30 @@ export type SessionData = {
   modules: string[];
 };
 
-export type Brand = { name: string; logo_url: string };
+export type Brand = {
+  name: string;
+  subtitle: string;
+  logo_url: string;
+  default_name?: string;
+  default_subtitle?: string;
+};
+
+export type HabitItem = {
+  id: number;
+  title: string;
+  frequency: string;
+  target_count: number;
+  status: string;
+  start_date: string | null;
+  note: string | null;
+  month_done: number;
+  month_goal: number;
+  progress: number;
+  streak: number;
+  today_done: boolean;
+  today_log_id: number | null;
+  last_done: string | null;
+};
 
 export type Overview = {
   today: string;
@@ -33,6 +56,7 @@ export type Overview = {
     focus_7_minutes: number;
     focus_week_sessions: number;
     wake_days: number;
+    wake_hits: number;
     wake_rate: number | null;
     sleep_avg_7: number | null;
     workout_month_count: number;
@@ -43,13 +67,18 @@ export type Overview = {
     money_accounts: number;
     milestone_open: number;
     milestone_done: number;
+    milestone_total: number;
     milestone_rate: number | null;
   };
   focus_trend: { date: string; minutes: number }[];
   sleep_trend: { date: string; hours: number | null }[];
   todos: RecordItem[];
   money_accounts: { account: string; opening: number; closing: number; net: number }[];
+  finance_trend: { month: string; total: number; accounts: number }[];
   milestones: RecordItem[];
+  today_focus: { id: number; item: string; type: string; minutes: number }[];
+  habits: HabitItem[];
+  today_sleep: RecordItem | null;
   today_log: RecordItem | null;
   review: RecordItem | null;
 };
@@ -65,6 +94,8 @@ export type AppContextValue = {
   refresh: () => void;
   toast: (message: string, action?: ToastAction) => void;
   openForm: (module: string, item?: RecordItem) => void;
+  openHabit: (item?: HabitItem) => void;
   openReview: () => void;
+  go: (key: string) => void;
 };
 

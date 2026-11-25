@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import get_db, init_db
 from .models import AppSetting
-from .routers import access, account, auth, export, modules, overview, reviews, settings as settings_router
+from .routers import access, account, auth, export, habits, modules, overview, reviews, settings as settings_router, update
 
 APP_DIR = Path(__file__).resolve().parents[2]
 DIST_DIR = APP_DIR / "frontend" / "dist"
@@ -22,14 +22,26 @@ def seed_defaults() -> None:
     try:
         row = db.get(AppSetting, "brand")
         if row is None:
-            db.add(AppSetting(key="brand", value={"name": settings.brand_default_name, "logo_url": ""}))
+            db.add(
+                AppSetting(
+                    key="brand",
+                    value={
+                        "name": settings.brand_default_name,
+                        "subtitle": settings.brand_default_subtitle,
+                        "logo_url": "",
+                    },
+                )
+            )
+            db.commit()
+        elif isinstance(row.value, dict) and "subtitle" not in row.value:
+            row.value = {**row.value, "subtitle": settings.brand_default_subtitle}
             db.commit()
     finally:
         db.close()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="此刻 API", version="1.0.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="笔记 · 备忘录 API", version="1.0.0", docs_url=None, redoc_url=None)
 
     app.include_router(auth.router)
     app.include_router(account.router)
@@ -37,8 +49,10 @@ def create_app() -> FastAPI:
     app.include_router(access.router)
     app.include_router(overview.router)
     app.include_router(reviews.router)
+    app.include_router(habits.router)
     app.include_router(modules.router)
     app.include_router(export.router)
+    app.include_router(update.router)
 
     @app.get("/api/health")
     def health(db: Session = Depends(get_db)) -> dict:

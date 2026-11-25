@@ -286,3 +286,45 @@ class WeeklyReview(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "week_start", name="uq_review_user_week"),
     )
+
+
+class Habit(Base):
+    """坚持事项：每天/每周/每月要做的事，进度按当月打卡数折算。"""
+
+    __tablename__ = "habits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    frequency: Mapped[str] = mapped_column(String(8), default="每天")
+    target_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(8), default="进行中")
+    start_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+
+
+class HabitLog(Base):
+    """打卡记录：同一事项同一天只保留一条（软删除后可重新打卡）。"""
+
+    __tablename__ = "habit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    habit_id: Mapped[int] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"), index=True)
+    log_date: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+
+    __table_args__ = (
+        Index(
+            "uq_habit_log_day",
+            "habit_id",
+            "log_date",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
+    )

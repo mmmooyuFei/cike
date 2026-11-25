@@ -2,25 +2,25 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import User
+from ..models import Habit, HabitLog, User
 from ..permissions import module_allowed
 from ..security import current_user, user_public
+from ..timeutil import app_today
 from .modules import CFG, serialize
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 
 @router.get("")
-def export_all(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    data = {"user": user_public(user), "exported_at": date.today().isoformat(), "modules": {}}
+def export_all(user: User = Depends(current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    data = {"user": user_public(user), "exported_at": app_today().isoformat(), "modules": {}}
     for module, cfg in CFG.items():
         if not module_allowed(db, user, module):
             continue
@@ -33,7 +33,23 @@ def export_all(user: User = Depends(current_user), db: Session = Depends(get_db)
             )
         )
         data["modules"][module] = [serialize(item) for item in rows]
-    return data
+    if module_allowed(db, user, "habits"):
+        habits = list(
+            db.scalars(
+                select(Habit).where(Habit.user_id == user.id, Habit.deleted_at.is_(None))
+            )
+        )
+        data["modules"]["habits"] = [serialize(item) for item in habits]
+        logs = list(
+            db.scalars(
+                select(HabitLog).where(HabitLog.user_id == user.id, HabitLog.deleted_at.is_(None))
+            )
+        )
+        data["modules"]["habit_logs"] = [serialize(item) for item in logs]
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": 'attachment; filename="cike-export.json"'},
+    )
 
 
 @router.get("/{module}.csv")

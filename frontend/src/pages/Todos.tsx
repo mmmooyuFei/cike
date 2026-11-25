@@ -14,8 +14,10 @@ function todayIso(): string {
 export function Todos({ ctx }: { ctx: AppContextValue }) {
   const [items, setItems] = useState<RecordItem[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -42,8 +44,17 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
     done: items.filter((item) => item.status === "done").length,
   };
 
-  const visible = items.filter((item) => {
+  const text = query.trim().toLowerCase();
+  const searched = text
+    ? items.filter((item) =>
+        [item.title, item.note, item.category, item.priority, item.due_date]
+          .some((value) => String(value ?? "").toLowerCase().includes(text)),
+      )
+    : items;
+
+  const visible = searched.filter((item) => {
     const done = item.status === "done";
+    if (filter === "all") return true;
     if (filter === "done") return done;
     if (done) return false;
     if (filter === "today") return item.due_date === todayIso();
@@ -52,13 +63,17 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
   });
 
   const toggle = async (item: RecordItem) => {
+    if (busyId !== null) return;
     const done = item.status === "done";
+    setBusyId(Number(item.id));
     try {
       await api.post(`/data/todos/${item.id}/toggle`, { done: !done });
       ctx.toast(done ? "已恢复为未完成" : "已完成");
       ctx.refresh();
     } catch (err) {
       ctx.toast(errorText(err));
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -93,6 +108,13 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
             </button>
           ))}
         </div>
+        <input
+          type="search"
+          value={query}
+          placeholder="搜索标题、备注、分类…"
+          aria-label="搜索待办"
+          onChange={(event) => setQuery(event.target.value)}
+        />
         <button type="button" className="primary" onClick={() => ctx.openForm("todos")}>
           ＋ 新增
         </button>
@@ -114,8 +136,13 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
         </div>
       ) : visible.length === 0 ? (
         <div className="panel empty">
-          <b>{filter === "done" ? "还没有完成的事" : "这个筛选下没有待办"}</b>
-          <p>只登记明天有人问起来答不上来会出问题的那种事。</p>
+          <b>{text ? "没有匹配的待办" : filter === "done" ? "还没有完成的事" : "这个筛选下没有待办"}</b>
+          <p>{text ? "换个关键词，或清空搜索。" : "只登记明天有人问起来答不上来会出问题的那种事。"}</p>
+          <div className="ex-list">
+            {["确认 12 月排产计划", "回访杭州代工厂", "看完组织架构方案"].map((example) => (
+              <span key={example}>{example}</span>
+            ))}
+          </div>
           <button type="button" className="primary" onClick={() => ctx.openForm("todos")}>
             新增待办
           </button>
@@ -126,7 +153,13 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
             const done = item.status === "done";
             return (
               <div className={`panel todo ${done ? "is-done" : ""}`} key={String(item.id)}>
-                <button type="button" className={`check ${done ? "on" : ""}`} onClick={() => void toggle(item)} aria-label="切换完成">
+                <button
+                  type="button"
+                  className={`check ${done ? "on" : ""}`}
+                  disabled={busyId !== null}
+                  onClick={() => void toggle(item)}
+                  aria-label="切换完成"
+                >
                   ✓
                 </button>
                 <div className="row-copy">

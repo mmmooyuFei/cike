@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText } from "./api";
 import { useAuth } from "./auth";
-import { LogoMark, Picker, RecordForm, ReviewForm, Sheet } from "./components";
+import { Avatar, HabitForm, LogoMark, Picker, RecordForm, ReviewForm, Sheet } from "./components";
 import {
   bumpOidcRetry,
   clearOidcRetry,
@@ -14,9 +14,11 @@ import {
 import { Access } from "./pages/Access";
 import { Account } from "./pages/Account";
 import { Dashboard } from "./pages/Dashboard";
+import { Habits } from "./pages/Habits";
 import { ModulePage } from "./pages/Modules";
 import { Todos } from "./pages/Todos";
-import type { AppContextValue, Brand, RecordItem } from "./types";
+import { Update } from "./pages/Update";
+import type { AppContextValue, Brand, HabitItem, RecordItem } from "./types";
 
 type LoginMode = {
   dev_auth: boolean;
@@ -38,6 +40,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { key: "dashboard", label: "驾驶舱", group: "今天", title: "今天要推进什么？", sub: "先看一眼今天的量，做了多少记多少。", module: "dashboard" },
   { key: "todos", label: "待办", group: "今天", title: "今天要处理什么？", sub: "没做完的会一直留在这里提醒你。", module: "todos" },
+  { key: "habits", label: "坚持打卡", group: "推进", title: "这个月坚持了几件事？", sub: "把想坚持的事列出来，每天做到就点一下打卡。", module: "habits" },
   { key: "milestones", label: "里程碑", group: "推进", title: "这一年想做成什么？", sub: "只写真正在乎的，五件起。", module: "milestones" },
   { key: "daily", label: "每日日志", group: "记录", title: "今天怎么样？", sub: "三个框：今天做了什么、明天打算、卡在哪。", module: "daily" },
   { key: "sleep", label: "睡眠", group: "记录", title: "昨晚睡得怎么样？", sub: "凌晨 0–6 点的睡前打卡自动归到前一天。", module: "sleep" },
@@ -45,7 +48,8 @@ const NAV: NavItem[] = [
   { key: "workouts", label: "健身", group: "记录", title: "这个月练了几次？", sub: "一周三次就够，别追满勤。", module: "workouts" },
   { key: "money", label: "资金", group: "钱", title: "这个月钱多了还是少了？", sub: "按账户记：月底填期初和期末。", module: "money" },
   { key: "account", label: "账号设置", group: "个人", title: "账号设置", sub: "管理资料、安全与访问范围。", module: "account" },
-  { key: "access", label: "权限管理", group: "个人", title: "权限管理", sub: "按 Casdoor 角色 / 群组限制模块可见与可编辑。", admin: true },
+  { key: "access", label: "权限管理", group: "管理", title: "权限管理", sub: "按 Casdoor 角色 / 群组限制模块可见与可编辑。", admin: true },
+  { key: "update", label: "更新管理", group: "管理", title: "更新管理", sub: "查看运行版本，检查并拉取新版本。", admin: true },
 ];
 
 function dateLabel(): string {
@@ -62,11 +66,12 @@ export default function App() {
   const { session, loading, loginDev, logout, refresh: refreshSession } = useAuth();
   const [route, setRoute] = useState(readHash);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [brand, setBrand] = useState<Brand>({ name: "此刻", logo_url: "" });
+  const [brand, setBrand] = useState<Brand>({ name: "此刻", subtitle: "笔记 · 备忘录", logo_url: "" });
   const [sheet, setSheet] = useState<
     | null
     | { kind: "picker" }
     | { kind: "form"; module: string; item?: RecordItem }
+    | { kind: "habit"; item?: HabitItem }
     | { kind: "review" }
   >(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -101,8 +106,8 @@ export default function App() {
   }, [toastState]);
 
   useEffect(() => {
-    document.title = `${brand.name} · 个人工作台`;
-  }, [brand.name]);
+    document.title = brand.subtitle ? `${brand.name} · ${brand.subtitle}` : brand.name;
+  }, [brand.name, brand.subtitle]);
 
   useEffect(() => {
     api
@@ -184,6 +189,8 @@ export default function App() {
     setSheet({ kind: "form", module, item });
   };
 
+  const openHabit = (item?: HabitItem) => setSheet({ kind: "habit", item });
+
   const openReview = () => setSheet({ kind: "review" });
 
   const closeSheet = () => setSheet(null);
@@ -195,13 +202,15 @@ export default function App() {
     refresh,
     toast,
     openForm,
+    openHabit,
     openReview,
+    go,
   };
 
   const meta = NAV.find((item) => item.key === route) || NAV[0];
   const visibleNav = NAV.filter((item) => allowed.has(item.key));
   const groups = Array.from(new Set(visibleNav.map((item) => item.group)));
-  const mobileKeys = ["dashboard", "todos", "focus", "money"];
+  const mobileKeys = ["dashboard", "todos", "milestones", "daily", "money"];
 
   return (
     <div className="app">
@@ -210,7 +219,7 @@ export default function App() {
           {brand.logo_url ? <img className="brand-logo" src={brand.logo_url} alt="" /> : <LogoMark />}
           <div>
             <b>{brand.name}</b>
-            <small>个人工作台</small>
+            {brand.subtitle ? <small>{brand.subtitle}</small> : null}
           </div>
         </div>
         <nav className="nav-list">
@@ -235,8 +244,8 @@ export default function App() {
           <span className="pulse" />
           <span>{session.is_admin ? "站点管理员" : "个人账号"}</span>
         </div>
-        <button type="button" className="account-chip" onClick={() => go("account")}>
-          <span className="avatar">{(session.user.display_name || "此").slice(0, 1)}</span>
+        <button type="button" className="account-chip" onClick={() => go("account")} title="账号设置">
+          <Avatar className="avatar" src={session.user.avatar_url} name={session.user.display_name} />
           <span>
             {session.user.display_name}
             <small>{session.user.username}</small>
@@ -250,7 +259,7 @@ export default function App() {
             {brand.logo_url ? <img className="brand-logo" src={brand.logo_url} alt="" /> : <LogoMark size={30} />}
             <div>
               <b>{brand.name}</b>
-              <small>个人工作台</small>
+              {brand.subtitle ? <small>{brand.subtitle}</small> : null}
             </div>
           </div>
           <div className="btn-row">
@@ -267,6 +276,7 @@ export default function App() {
           </div>
           <div className="actions">
             <span className="sync-inline"><i />已登录</span>
+            <button type="button" className="ghost" onClick={() => refresh()}>刷新</button>
             <button type="button" className="ghost" onClick={() => setPaletteOpen(true)}>⌘K</button>
             <button type="button" className="primary" onClick={() => setSheet({ kind: "picker" })}>＋ 记一笔</button>
           </div>
@@ -274,19 +284,23 @@ export default function App() {
 
         {route === "dashboard" ? <Dashboard ctx={ctx} /> : null}
         {route === "todos" ? <Todos ctx={ctx} /> : null}
+        {route === "habits" ? <Habits ctx={ctx} /> : null}
         {["milestones", "daily", "sleep", "focus", "workouts", "money"].includes(route) ? <ModulePage module={route} ctx={ctx} /> : null}
         {route === "account" ? <Account ctx={ctx} /> : null}
         {route === "access" && session.is_admin ? <Access ctx={ctx} /> : null}
+        {route === "update" && session.is_admin ? <Update ctx={ctx} /> : null}
 
-        <p className="prototype-note">此刻 · 个人工作台 · 数据按登录用户隔离</p>
+        <p className="prototype-note">{brand.name} · {brand.subtitle || "笔记 · 备忘录"} · 数据按登录用户隔离</p>
       </main>
 
       <nav className="tabbar">
         {mobileKeys.filter((key) => allowed.has(key)).map((key) => {
           const item = NAV.find((entry) => entry.key === key)!;
+          const icon =
+            key === "dashboard" ? "◎" : key === "todos" ? "✓" : key === "milestones" ? "◇" : key === "daily" ? "✎" : "¥";
           return (
             <button type="button" key={key} className={`tab ${route === key ? "on" : ""}`} onClick={() => go(key)}>
-              <i>{key === "dashboard" ? "◎" : key === "todos" ? "✓" : key === "focus" ? "◐" : "¥"}</i>
+              <i>{icon}</i>
               <span>{item.label === "驾驶舱" ? "今天" : item.label}</span>
             </button>
           );
@@ -314,13 +328,47 @@ export default function App() {
         </div>
       ) : null}
 
-      <Sheet
-        open={Boolean(sheet)}
-        title={sheet?.kind === "picker" ? "记一笔" : sheet?.kind === "review" ? "本周回顾" : sheet ? `新增 · ${labelOf(sheet.module)}` : ""}
-        sub={sheet?.kind === "picker" ? "选一类，填两三个空就够" : sheet?.kind === "review" ? "3 个问题，5 分钟" : ""}
-        onClose={closeSheet}
-      >
-        {sheet?.kind === "picker" ? <Picker onPick={(module) => setSheet({ kind: "form", module })} /> : null}
+        <Sheet
+          open={Boolean(sheet)}
+          title={
+            sheet?.kind === "picker"
+              ? "记一笔"
+              : sheet?.kind === "review"
+                ? "本周回顾"
+                : sheet?.kind === "habit"
+                  ? `${sheet.item?.id ? "编辑" : "新增"} · 坚持事项`
+                  : sheet
+                    ? `${sheet.item?.id ? "编辑" : "新增"} · ${labelOf(sheet.module)}`
+                    : ""
+          }
+          sub={
+            sheet?.kind === "picker"
+              ? "选一类，填两三个空就够"
+              : sheet?.kind === "review"
+                ? "3 个问题，5 分钟"
+                : sheet?.kind === "habit"
+                  ? "每天做到就点一下，月度进度自动算"
+                  : sheet?.kind === "form" && sheet.item?.id
+                    ? "改完点保存，列表里同步更新"
+                    : "填几个关键的就够，其他可以留空"
+          }
+          onClose={closeSheet}
+        >
+        {sheet?.kind === "picker" ? (
+          <Picker onPick={(module) => setSheet(module === "habits" ? { kind: "habit" } : { kind: "form", module })} />
+        ) : null}
+        {sheet?.kind === "habit" ? (
+          <HabitForm
+            item={sheet.item}
+            onCancel={closeSheet}
+            onError={(message) => toast(message)}
+            onDone={(message) => {
+              closeSheet();
+              toast(message);
+              refresh();
+            }}
+          />
+        ) : null}
         {sheet?.kind === "form" ? (
           <RecordForm
             module={sheet.module}
@@ -361,8 +409,6 @@ export default function App() {
             setSheet({ kind: "review" });
           }}
           onExport={() => window.open("/api/export", "_blank")}
-          onAccess={() => go("access")}
-          isAdmin={session.is_admin}
         />
       ) : null}
 
@@ -384,6 +430,7 @@ function labelOf(module: string): string {
   return (
     {
       todos: "待办",
+      habits: "坚持事项",
       milestones: "里程碑",
       daily: "每日日志",
       sleep: "睡眠",
@@ -491,10 +538,10 @@ function Login({
       <div className="login">
         <div className="login-card">
           <div className="brand big">
-            <LogoMark size={44} />
+            {brand.logo_url ? <img className="brand-logo" src={brand.logo_url} alt="" /> : <LogoMark size={44} />}
             <div>
               <b>{brand.name}</b>
-              <small>个人工作台</small>
+              {brand.subtitle ? <small>{brand.subtitle}</small> : null}
             </div>
           </div>
           <h1>正在跳转到 {provider}…</h1>
@@ -508,10 +555,10 @@ function Login({
     <div className="login">
       <div className="login-card">
         <div className="brand big">
-          <LogoMark size={44} />
+          {brand.logo_url ? <img className="brand-logo" src={brand.logo_url} alt="" /> : <LogoMark size={44} />}
           <div>
             <b>{brand.name}</b>
-            <small>个人工作台</small>
+            {brand.subtitle ? <small>{brand.subtitle}</small> : null}
           </div>
         </div>
         <h1>先记下此刻。</h1>
@@ -544,8 +591,6 @@ function Palette({
   onNew,
   onReview,
   onExport,
-  onAccess,
-  isAdmin,
 }: {
   onClose: () => void;
   nav: NavItem[];
@@ -553,8 +598,6 @@ function Palette({
   onNew: () => void;
   onReview: () => void;
   onExport: () => void;
-  onAccess: () => void;
-  isAdmin: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
@@ -563,7 +606,6 @@ function Palette({
     { label: "记一笔", hint: "n", run: onNew },
     { label: "本周回顾", hint: "5 min", run: onReview },
     { label: "导出数据", hint: "JSON", run: onExport },
-    ...(isAdmin ? [{ label: "权限管理", hint: "admin", run: onAccess }] : []),
   ];
   const visible = actions.filter((item) => !query || item.label.includes(query) || item.hint.includes(query));
   const current = Math.min(index, Math.max(0, visible.length - 1));

@@ -10,6 +10,7 @@ from ..db import get_db
 from ..models import User, WeeklyReview
 from ..permissions import module_guard
 from ..security import require_csrf
+from ..timeutil import app_today
 from .modules import serialize
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
@@ -40,7 +41,7 @@ def save_review(
 ) -> dict:
     raw = str(payload.get("week_start") or "")[:10]
     try:
-        week_start = date.fromisoformat(raw) if raw else monday_of(date.today())
+        week_start = date.fromisoformat(raw) if raw else monday_of(app_today())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid_week_start") from exc
     week_start = monday_of(week_start)

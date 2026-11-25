@@ -16,6 +16,7 @@ from ..db import get_db
 from ..models import DailyLog, FocusSession, Milestone, MoneyRecord, SleepRecord, Todo, User, Workout, utcnow
 from ..permissions import module_guard
 from ..security import current_user, require_csrf
+from ..timeutil import app_now, app_today
 
 router = APIRouter(prefix="/api/data", tags=["modules"])
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -136,7 +137,7 @@ CFG: dict[str, dict[str, Any]] = {
 
 
 def today() -> date:
-    return date.today()
+    return app_today()
 
 
 def coerce(kind: str, value: Any, limit: int | None = None) -> Any:
@@ -240,19 +241,8 @@ def build_values(module: str, payload: dict, *, creating: bool) -> dict[str, Any
         for field in cfg["required"]:
             if not values.get(field):
                 raise HTTPException(status_code=422, detail=f"missing_{field}")
-    if module == "money":
-        month = values.get("month")
-        if isinstance(month, date):
-            values["month"] = month.replace(day=1)
-        opening = float(values.get("opening") or 0)
-        closing = float(values.get("closing") or 0)
-        values["opening"] = opening
-        values["closing"] = closing
-        values["net"] = round(closing - opening, 2)
     if module == "todos" and "status" in values:
         values["completed_at"] = utcnow() if values["status"] == "done" else None
-    if module == "milestones" and values.get("status") == "已完成" and "completed_at" not in values:
-        values["completed_at"] = utcnow()
     return values
 
 
@@ -265,6 +255,53 @@ def find_owned(db: Session, module: str, user: User, item_id: int, *, include_de
     if obj is None:
         raise HTTPException(status_code=404, detail="record_not_found")
     return obj
+
+
+def apply_completed_at(module: str, values: dict, existing: Any = None) -> None:
+    """里程碑的完成时间：只在状态真的变化时写入/清除，重复保存不会刷新它。"""
+    if module != "milestones" or "status" not in values:
+        return
+    status = values.get("status")
+    if status == "已完成":
+        if existing is None or existing.completed_at is None:
+            values["completed_at"] = utcnow()
+    else:
+        values["completed_at"] = None
+
+
+def apply_money_totals(module: str, values: dict, existing: Any = None) -> None:
+    """月份归一 + 净变动自动算；只改备注时不动余额。"""
+    if module != "money":
+        return
+    month = values.get("month")
+    if isinstance(month, date):
+        values["month"] = month.replace(day=1)
+    if "opening" not in values and "closing" not in values and existing is not None:
+        return
+    opening = float(values.get("opening", getattr(existing, "opening", 0)) or 0)
+    closing = float(values.get("closing", getattr(existing, "closing", 0)) or 0)
+    values["opening"] = opening
+    values["closing"] = closing
+    values["net"] = round(closing - opening, 2)
+
+
+def drop_null_required(module: str, values: dict) -> None:
+    """SELECT / 数字被清空时不要给非空列写 NULL。
+
+    列默认值只在 INSERT 生效，UPDATE 写 NULL 会触发 IntegrityError 并被误报成“记录冲突”。
+    这里把空值换成该字段的默认值；没有默认值的保留原值（从 values 移除）。
+    """
+    model = cfg_for(module)["model"]
+    fallback = defaults(module)
+    for field, value in list(values.items()):
+        if value is not None:
+            continue
+        column = model.__table__.columns.get(field)
+        if column is not None and not column.nullable:
+            if field in fallback and fallback[field] is not None:
+                values[field] = fallback[field]
+            else:
+                values.pop(field)
 
 
 def find_merge_target(db: Session, module: str, user: User, values: dict) -> Any:
@@ -342,10 +379,27 @@ def create_item(
     if not _allowed(db, user, module):
         raise HTTPException(status_code=403, detail="module_forbidden")
     values = build_values(module, payload, creating=True)
+    drop_null_required(module, values)
+    apply_money_totals(module, values)
     target = find_merge_target(db, module, user, values)
     if target is not None:
-        for key, value in values.items():
-            setattr(target, key, value)
+        # 同一天/同月已有记录：只覆盖本次明确提交的字段，其余保持原值
+        explicit = [field for field in cfg_for(module)["fields"] if field in payload]
+        for field in explicit:
+            if field in values:
+                setattr(target, field, values[field])
+        if module == "milestones":
+            apply_completed_at(module, values, existing=target)
+            if "completed_at" in values:
+                target.completed_at = values["completed_at"]
+        if module == "money":
+            opening = float(values["opening"]) if "opening" in explicit else float(target.opening or 0)
+            closing = float(values["closing"]) if "closing" in explicit else float(target.closing or 0)
+            if "opening" in explicit:
+                target.opening = opening
+            if "closing" in explicit:
+                target.closing = closing
+            target.net = round(closing - opening, 2)
         try:
             db.commit()
         except IntegrityError as exc:
@@ -353,6 +407,7 @@ def create_item(
             raise HTTPException(status_code=409, detail="record_conflict") from exc
         db.refresh(target)
         return {"item": serialize(target), "merged": True}
+    apply_completed_at(module, values)
     obj = cfg_for(module)["model"](user_id=user.id, **values)
     db.add(obj)
     try:
@@ -378,8 +433,9 @@ def update_item(
         raise HTTPException(status_code=403, detail="module_forbidden")
     obj = find_owned(db, module, user, item_id)
     values = build_values(module, payload, creating=False)
-    if module == "money" and ("opening" in values or "closing" in values):
-        values["net"] = round(float(values.get("closing", obj.closing) or 0) - float(values.get("opening", obj.opening) or 0), 2)
+    drop_null_required(module, values)
+    apply_money_totals(module, values, existing=obj)
+    apply_completed_at(module, values, existing=obj)
     for key, value in values.items():
         setattr(obj, key, value)
     try:
@@ -471,7 +527,7 @@ def punch_sleep(
     db: Session = Depends(get_db),
 ) -> dict:
     kind = "sleep" if str(payload.get("kind")) == "sleep" else "wake"
-    time_value = coerce("time", payload.get("time") or datetime.now().strftime("%H:%M"))
+    time_value = coerce("time", payload.get("time") or app_now().strftime("%H:%M"))
     raw_date = str(payload.get("date") or "")[:10]
     try:
         day = date.fromisoformat(raw_date) if raw_date else today()
