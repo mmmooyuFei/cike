@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     oidc_redirect_uri: str = ""
     oidc_scopes: str = "openid profile email"
     oidc_pkce: bool = False
+    oidc_display_name: str = "统一登录"
+    oidc_auto_login: bool = True
     admin_role: str = "admin"
 
     brand_default_name: str = "此刻"

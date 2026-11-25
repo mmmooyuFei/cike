@@ -25,9 +25,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.get("/login-mode")
 def login_mode() -> dict:
+    oidc_ready = bool(settings.oidc_issuer and settings.oidc_client_id)
     return {
         "dev_auth": settings.dev_auth,
-        "oidc": bool(settings.oidc_issuer and settings.oidc_client_id),
+        "oidc": oidc_ready,
+        "provider_name": settings.oidc_display_name,
+        "auto_login": bool(settings.oidc_auto_login and oidc_ready and not settings.dev_auth),
         "brand": settings.brand_default_name,
     }
 

@@ -9,6 +9,13 @@ import { ModulePage } from "./pages/Modules";
 import { Todos } from "./pages/Todos";
 import type { AppContextValue, Brand, RecordItem } from "./types";
 
+type LoginMode = {
+  dev_auth: boolean;
+  oidc: boolean;
+  provider_name: string;
+  auto_login: boolean;
+};
+
 type NavItem = {
   key: string;
   label: string;
@@ -56,7 +63,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [toastState, setToastState] = useState<{ message: string; action?: { label: string; run: () => void } } | null>(null);
-  const [loginMode, setLoginMode] = useState<{ dev_auth: boolean; oidc: boolean } | null>(null);
+  const [loginMode, setLoginMode] = useState<LoginMode | null>(null);
 
   const toast = (message: string, action?: { label: string; run: () => void }) => setToastState({ message, action });
 
@@ -89,8 +96,15 @@ export default function App() {
   }, [brand.name]);
 
   useEffect(() => {
-    api.get<{ dev_auth: boolean; oidc: boolean }>("/auth/login-mode").then(setLoginMode).catch(() => setLoginMode({ dev_auth: false, oidc: false }));
+    api
+      .get<LoginMode>("/auth/login-mode")
+      .then(setLoginMode)
+      .catch(() => setLoginMode({ dev_auth: false, oidc: false, provider_name: "统一登录", auto_login: false }));
   }, []);
+
+  useEffect(() => {
+    if (session.user) sessionStorage.removeItem("cike_skip_auto_login");
+  }, [session.user]);
 
   useEffect(() => {
     const onHash = () => setRoute(readHash());
@@ -373,12 +387,14 @@ function Login({
   onDevLogin,
 }: {
   brand: Brand;
-  mode: { dev_auth: boolean; oidc: boolean } | null;
+  mode: LoginMode | null;
   onDevLogin: (role: "admin" | "user") => Promise<void>;
 }) {
   const [error, setError] = useState("");
+  const [skipAutoLogin] = useState(() => sessionStorage.getItem("cike_skip_auto_login") === "1");
   const params = new URLSearchParams(window.location.search);
   const loginError = params.get("login_error");
+  const provider = mode?.provider_name || "统一登录";
   const loginErrorText: Record<string, string> = {
     oidc_code_expired: "登录凭证已失效，请重新点击登录",
     oidc_state_invalid: "登录状态已过期，请重试",
@@ -390,6 +406,12 @@ function Login({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loginError]);
 
+  const autoLogin = Boolean(mode?.auto_login && mode.oidc && !loginError && !skipAutoLogin);
+
+  useEffect(() => {
+    if (autoLogin) window.location.replace("/api/auth/oidc/login");
+  }, [autoLogin]);
+
   const dev = async (role: "admin" | "user") => {
     setError("");
     try {
@@ -398,6 +420,28 @@ function Login({
       setError(errorText(err));
     }
   };
+
+  if (!mode) {
+    return <div className="boot">正在连接登录服务…</div>;
+  }
+
+  if (autoLogin) {
+    return (
+      <div className="login">
+        <div className="login-card">
+          <div className="brand big">
+            <LogoMark size={44} />
+            <div>
+              <b>{brand.name}</b>
+              <small>个人工作台</small>
+            </div>
+          </div>
+          <h1>正在跳转到 {provider}…</h1>
+          <p>如果浏览器已登录统一认证，会自动回到工作台。</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="login">
@@ -412,15 +456,21 @@ function Login({
         <h1>先记下此刻。</h1>
         <p>待办、日志、睡眠、专注、健身与资金，按天收好；数据只属于登录的人。</p>
         {error ? <div className="login-error">{error}</div> : null}
-        {mode?.dev_auth ? (
+        {mode.dev_auth ? (
           <div className="dev-login">
             <div className="muted">本地开发身份切换器</div>
             <button type="button" className="primary" onClick={() => void dev("admin")}>以管理员进入</button>
             <button type="button" onClick={() => void dev("user")}>以普通用户进入</button>
-            <div className="tip">生产环境会关闭这个入口，改走 Casdoor OIDC。</div>
+            <div className="tip">生产环境会关闭这个入口，改走统一认证。</div>
           </div>
-        ) : mode?.oidc ? (
-          <a className="primary btn" href="/api/auth/oidc/login">使用 Casdoor 登录</a>
+        ) : mode.oidc ? (
+          <a
+            className="primary btn"
+            href="/api/auth/oidc/login"
+            onClick={() => sessionStorage.removeItem("cike_skip_auto_login")}
+          >
+            使用 {provider} 登录
+          </a>
         ) : (
           <div className="login-error">未配置登录方式，请检查服务端 OIDC 配置。</div>
         )}

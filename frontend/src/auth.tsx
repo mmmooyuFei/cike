@@ -34,6 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const logout = useCallback(async () => {
+    // 退出后不要在本标签页立刻自动 SSO 回来；用户主动点击登录时再清除。
+    sessionStorage.setItem("cike_skip_auto_login", "1");
     try {
       await api.post("/auth/logout");
     } finally {
