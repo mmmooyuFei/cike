@@ -52,6 +52,20 @@ export function stepSprings(items: SpringState[], dtMs: number): TickResult {
   return { moving };
 }
 
+/**
+ * 关闭用的弹簧参数：收起比展开快得多（约 200ms 落位，展开约 500ms）。
+ * 展开是一段"要看清内容"的过程，收起来只是回应一次「我不要了」，拖长会显得迟钝。
+ */
+export const CLOSE_STIFFNESS = 620;
+export const CLOSE_DAMPING = 48;
+
+export function applyCloseTempo(items: SpringState[]): void {
+  for (const item of items) {
+    item.stiffness = CLOSE_STIFFNESS;
+    item.damping = CLOSE_DAMPING;
+  }
+}
+
 /** reduced-motion 或者要「直接落位」时用：所有弹簧一步到目标 */
 export function settleSprings(items: SpringState[]): void {
   for (const item of items) {
@@ -61,6 +75,16 @@ export function settleSprings(items: SpringState[]): void {
 }
 
 /* ---------------------------------------------------------------- 几何 */
+
+/**
+ * 展开用的弹簧参数。
+ *
+ * 参考值（320/36、280/32）落位约 500ms，实测在真站里显得拖 —— 这是"点一下开一张面板"的动作，
+ * 不是一段要看清的过程。调到这里：落位约 220–260ms，ζ 略小于 1，收尾带一点点过冲，读起来是"弹开"。
+ */
+export const OPEN_NAV = { stiffness: 470, damping: 40 };
+export const OPEN_BODY = { stiffness: 430, damping: 38 };
+export const OPEN_CARD = { stiffness: 400, damping: 38 };
 
 export const ROW_H = 40; // 列表行高
 export const LIST_PAD = 8; // 列表上下留白

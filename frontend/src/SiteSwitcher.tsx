@@ -3,6 +3,10 @@ import { createPortal } from "react-dom";
 import { NAV_MENU_FALLBACK, fetchNavMenu, openMenuSite, type MenuSite, type NavMenu } from "./menu";
 import {
   ANCHOR_OFFSET,
+  OPEN_BODY,
+  OPEN_CARD,
+  OPEN_NAV,
+  applyCloseTempo,
   GAP,
   LIST_PAD,
   STACK_DECK_H,
@@ -261,12 +265,12 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     });
     const initialActive = Math.max(0, sites.findIndex((site) => isCurrent(site)));
     motion.current = {
-      navWidth: spring(rect.width, 320, 36),
-      navHeight: spring(rect.height, 320, 36),
-      progress: spring(0, 320, 36),
-      body: spring(0, 280, 32),
-      iconX: spring(0, 320, 36),
-      cards: sites.map((_, i) => spring(i === initialActive ? 0 : 102, 260, 32)),
+      navWidth: spring(rect.width, OPEN_NAV.stiffness, OPEN_NAV.damping),
+      navHeight: spring(rect.height, OPEN_NAV.stiffness, OPEN_NAV.damping),
+      progress: spring(0, OPEN_NAV.stiffness, OPEN_NAV.damping),
+      body: spring(0, OPEN_BODY.stiffness, OPEN_BODY.damping),
+      iconX: spring(0, OPEN_NAV.stiffness, OPEN_NAV.damping),
+      cards: sites.map((_, i) => spring(i === initialActive ? 0 : 102, OPEN_CARD.stiffness, OPEN_CARD.damping)),
       layer: 1,
       zLayers: sites.map((_, i) => (i === initialActive ? 1 : 0)),
       phase: "open",
@@ -291,6 +295,7 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     }
     const rect = trigger.getBoundingClientRect();
     m.phase = "closing";
+    applyCloseTempo([m.navWidth, m.navHeight, m.progress, m.body, m.iconX, ...m.cards]);
     m.navWidth.target = rect.width;
     m.navHeight.target = rect.height;
     m.progress.target = 0;
