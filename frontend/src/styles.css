@@ -784,81 +784,60 @@ span.avatar-big { background: linear-gradient(140deg, var(--avatar-a), var(--ava
 .site-wrap { position: relative; flex: 1; display: flex; }
 .site-wrap > .icon-btn { flex: 1; }
 
-/* 面板：桌面从侧栏底部往上弹；移动端改成贴顶通栏（见下面的媒体查询） */
+/*
+ * 站点面板：从触发图标那一侧展开，左边站名、右边封面卡组。
+ * 尺寸由 JS 每帧写进 style（弹簧积分），这里只定外观 —— 不要在 CSS 里写死宽高。
+ */
 .site-panel {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 10px);
-  transform: translateX(-50%);
-  z-index: 55;
-  width: 268px;
-  padding: 5px;
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--panel);
   box-shadow: 0 18px 48px var(--shadow-strong);
-  animation: site-in 0.14s ease;
 }
 
-@keyframes site-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-  to { opacity: 1; transform: translateX(-50%); }
+.site-list {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 8px;
+  overflow: hidden;
+  scrollbar-width: thin;
 }
 
-.site-cap {
-  padding: 6px 8px 8px;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--sub);
-}
-
-.site-item {
+.site-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  padding: 6px 8px;
+  height: 40px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: none;
-  color: var(--ink);
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.14s ease;
+  color: color-mix(in srgb, var(--ink) 46%, transparent);
+  transition: color 0.16s ease;
 }
 
-.site-item:hover { background: var(--fill); }
-.site-item.is-current { background: var(--fill); cursor: default; }
-
-.site-thumb {
-  position: relative;
-  overflow: hidden;
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  background: var(--brand-soft);
-  color: var(--brand-text);
-  font-family: var(--serif);
-  font-size: 12px;
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.site-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.site-row:hover,
+.site-row:focus-visible,
+.site-row.is-active { color: var(--ink); }
+.site-row:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
 
 .site-names { flex: 1; min-width: 0; }
 
 .site-names b {
   display: block;
   font-family: var(--serif);
-  font-size: 12.5px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -866,29 +845,129 @@ span.avatar-big { background: linear-gradient(140deg, var(--avatar-a), var(--ava
 
 .site-names small {
   display: block;
-  font-size: 10px;
-  letter-spacing: 0.3px;
-  color: var(--sub);
+  margin-top: 1px;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  color: color-mix(in srgb, var(--ink) 32%, transparent);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.site-badge {
+.site-row.is-active .site-names small { color: color-mix(in srgb, var(--ink) 62%, transparent); }
+
+.site-dot {
   flex: 0 0 auto;
-  padding: 1px 5px;
-  border: 1px solid var(--gold);
-  border-radius: 4px;
-  color: var(--gold);
-  font-size: 9.5px;
-  opacity: 0.9;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
 }
+
+.site-deck {
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 8px 8px 8px 0;
+}
+
+/* 照片框不吃主题色：深底才能压住画面边缘 */
+.site-deck-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #0b0d10;
+}
+
+.site-card {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  will-change: transform;
+}
+
+.site-card img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(var(--deck-scale, 1));
+}
+
+.site-card::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 58%;
+  background: linear-gradient(to top, rgba(6, 8, 10, 0.92), rgba(6, 8, 10, 0.35) 45%, transparent);
+}
+
+.site-card-cap {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 12px;
+  z-index: 2;
+  color: #fff;
+}
+
+.site-card-cap small,
+.site-card-cap b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  transition:
+    opacity 0.3s ease,
+    filter 0.3s ease,
+    transform 0.3s ease;
+}
+
+.site-card-cap small {
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.6);
+  filter: blur(2.5px);
+  transform: translateY(5px);
+}
+
+.site-card-cap b {
+  margin-top: 2px;
+  font-family: var(--serif);
+  font-size: 14px;
+  font-weight: 600;
+  filter: blur(3px);
+  transform: translateY(6px);
+}
+
+.site-card.is-text-on .site-card-cap small,
+.site-card.is-text-on .site-card-cap b {
+  opacity: 1;
+  filter: none;
+  transform: none;
+}
+
+.site-card.is-text-on .site-card-cap small { transition-delay: 0.06s; }
+.site-card.is-text-on .site-card-cap b { transition-delay: 0.11s; }
 
 .site-empty {
   margin: 0;
   padding: 10px 10px 12px;
   text-align: center;
   font-size: 11px;
+  line-height: 1.6;
+  color: var(--sub);
+}
+
+.site-note {
+  margin: 6px 4px 0;
+  padding: 7px 8px 0;
+  border-top: 1px solid var(--line);
+  font-size: 10px;
   line-height: 1.6;
   color: var(--sub);
 }
@@ -907,16 +986,5 @@ span.avatar-big { background: linear-gradient(140deg, var(--avatar-a), var(--ava
   }
   .mobile-head .icon-btn:hover { background: var(--fill); color: var(--ink); }
 
-  .site-panel {
-    position: fixed;
-    left: 10px;
-    right: 10px;
-    top: 62px;
-    bottom: auto;
-    width: auto;
-    transform: none;
-    z-index: 65;
-    box-shadow: 0 24px 60px var(--shadow-strong);
-    animation: none;
-  }
+
 }

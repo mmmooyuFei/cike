@@ -1,13 +1,29 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { NAV_MENU_FALLBACK, fetchNavMenu, openMenuSite, type MenuSite, type NavMenu } from "./menu";
+import {
+  ANCHOR_OFFSET,
+  GAP,
+  LIST_PAD,
+  STACK_DECK_H,
+  DECK_PAD,
+  measurePanel,
+  panelPosition,
+  settleSprings,
+  spring,
+  stepSprings,
+  type PanelGeometry,
+  type SpringState,
+} from "./siteSwitcherMotion";
 
 /**
- * 侧栏底部的「站点切换」。和另外两个站同一个位置、同一套图标语言，
- * 区别只在这边没有 UI 库：面板是自己写的一小块，样式走 `styles.css` 的主题令牌。
+ * 侧栏底部 / 手机顶部品牌条里的「站点切换」。
+ *
+ * 面板从触发图标那一侧展开：左边站名、右边封面卡组，hover 到哪一项那张卡就翻到最前。
+ * 三站同一套手感（`siteSwitcherMotion.ts`），这边没有 UI 库，样式走 `styles.css` 的令牌。
  *
  * 三点约定：
- * 1. 「导航台」固定第一项 —— 其余三个站都是它的下游，不给回去的路，
- *    「当前标签」模式下等于把自己锁死。
+ * 1. 面板挂到 body 上（Portal）：侧栏是 `overflow:hidden` 的，而且面板要溢出侧栏压住正文。
  * 2. 取不到就退回内置清单（`NAV_MENU_FALLBACK`），入口不会变成死按钮。
  * 3. 当前站按 host 判断：同一台机器上三个站域名不同、端口相同。
  */
@@ -20,50 +36,67 @@ const ICON_SWAP = (
   </svg>
 );
 
-function SiteRow({
-  site,
-  current,
-  onPick,
-}: {
-  site: MenuSite;
-  current: boolean;
-  onPick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={`site-item${current ? " is-current" : ""}`}
-      onClick={onPick}
-      aria-current={current ? "true" : undefined}
-    >
-      <span className="site-thumb">
-        {site.title.slice(0, 1)}
-        {site.thumb ? (
-          <img
-            src={site.thumb}
-            alt=""
-            loading="lazy"
-            decoding="async"
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-          />
-        ) : null}
-      </span>
-      <span className="site-names">
-        <b>{site.title}</b>
-        {site.subtitle ? <small>{site.subtitle}</small> : null}
-      </span>
-      {current ? <span className="site-badge">当前</span> : null}
-    </button>
-  );
+/**
+ * 卡组要 200×310，而导航台给的是 64px 派生件（`xxx-64.webp`）。
+ * 去掉尺寸后缀换成同名大图；命名不符就原样用 thumb —— 这张卡糊一点，但不会裂图。
+ * 导航台补上 `cover` 字段后删掉这里。
+ */
+function coverOf(thumb: string): string {
+  if (!thumb) return "";
+  return thumb.replace(/-64(\.(?:webp|jpe?g|png))(?:[?#].*)?$/i, "$1");
+}
+
+interface Motion {
+  navWidth: SpringState;
+  navHeight: SpringState;
+  progress: SpringState;
+  body: SpringState;
+  iconX: SpringState;
+  cards: SpringState[];
+  layer: number;
+  zLayers: number[];
+  phase: "open" | "closing";
+  geometry: PanelGeometry;
+  anchor: { left: number; top: number; bottom: number; width: number; height: number };
+  raf: number;
+  last: number;
+}
+
+function applyPosition(node: HTMLDivElement | null, pos: { left: number; top: number | null; bottom: number | null }) {
+  if (!node) return;
+  node.style.left = `${Math.round(pos.left)}px`;
+  if (pos.top === null) {
+    node.style.top = "";
+    node.style.bottom = `${Math.round(pos.bottom ?? 0)}px`;
+  } else {
+    node.style.bottom = "";
+    node.style.top = `${Math.round(pos.top)}px`;
+  }
 }
 
 export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
+  const [mounted, setMounted] = useState(false);
   const [open, setOpen] = useState(false);
   const [menu, setMenu] = useState<NavMenu | null>(null);
   const [failed, setFailed] = useState(false);
-  const wrapRef = useRef<HTMLSpanElement>(null);
+  const [active, setActive] = useState(0);
+
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const iconRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const deckRef = useRef<HTMLDivElement | null>(null);
+  const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const motion = useRef<Motion | null>(null);
+  const activeRef = useRef(0);
+  const openRef = useRef(false);
+  const reducedRef = useRef(false);
+
+  activeRef.current = active;
+  openRef.current = open;
+
+  const sites = menu?.sites ?? [];
+  const mode = menu?.openMode ?? "newTab";
 
   // 打开时才取数：这个入口不是首屏必需，别跟首屏抢带宽。
   useEffect(() => {
@@ -83,23 +116,6 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     };
   }, [open, menu]);
 
-  // 点外部 / Esc 关闭。没有 portal，事件挂在 document 上判断是否落在自己身上。
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: PointerEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   const host = typeof window === "undefined" ? "" : window.location.host;
   const isCurrent = (site: MenuSite) => {
     try {
@@ -109,45 +125,360 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     }
   };
 
-  return (
-    <span className={`site-wrap${mobile ? " is-mobile" : ""}`} ref={wrapRef}>
+  /* ------------------------------------------------------------ 渲染一帧 */
+
+  const paint = useCallback(() => {
+    const m = motion.current;
+    if (!m || !panelRef.current) return;
+    const g = m.geometry;
+    const w = Math.max(m.anchor.width, m.navWidth.value);
+    const h = Math.max(m.anchor.height, m.navHeight.value);
+    const p = Math.min(1, Math.max(0, m.progress.value));
+    const deckWidth = g.deckWidth * p;
+    const gap = g.stacked ? 0 : GAP * Math.min(1, deckWidth / 24);
+
+    panelRef.current.style.width = `${Math.round(g.stacked ? w : w + gap + deckWidth)}px`;
+    panelRef.current.style.height = `${Math.round(g.stacked ? h + (STACK_DECK_H + DECK_PAD * 2 + gap) * p : h)}px`;
+    panelRef.current.style.opacity = String(Math.min(1, p * 3));
+
+    const list = listRef.current;
+    if (list) {
+      list.style.width = `${Math.round(w)}px`;
+      list.style.height = `${Math.round(h)}px`;
+      const room = Math.max(0, h - LIST_PAD * 2);
+      const overflows = sites.length * 40 > room + 0.5;
+      // 弹簧没落位时不许出滚动条：否则每帧都可能闪一条，还把站名挤去截断
+      list.style.overflowY = p > 0.999 && overflows ? "auto" : "hidden";
+      const body = Math.min(1, Math.max(0, m.body.value));
+      list.style.opacity = String(body);
+      list.style.transform = `translate3d(0, ${10 * (1 - body)}px, 0)`;
+    }
+    const deck = deckRef.current;
+    if (deck) {
+      deck.style.width = `${Math.round(g.stacked ? w : deckWidth)}px`;
+      deck.style.height = `${Math.round(g.stacked ? STACK_DECK_H + DECK_PAD * 2 : h)}px`;
+      deck.style.padding = g.stacked ? `${DECK_PAD}px` : `${DECK_PAD}px ${DECK_PAD}px ${DECK_PAD}px 0`;
+      deck.style.marginLeft = g.stacked ? "0px" : `${Math.round(gap)}px`;
+      deck.style.marginBottom = g.stacked ? `${Math.round(gap)}px` : "0px";
+      deck.style.opacity = String(Math.min(1, p * 1.6));
+    }
+    if (iconRef.current) {
+      iconRef.current.style.transform = `translate3d(0, ${-2 * Math.min(1, m.iconX.value)}px, 0)`;
+    }
+
+    const activeIndex = activeRef.current;
+    m.cards.forEach((item, index) => {
+      // 旧卡原地不动：等新卡基本落位（<0.6）后一次性压回 102%，此刻它已被完全盖住
+      if (index !== activeIndex && item.target === 0 && m.cards[activeIndex] && m.cards[activeIndex].value < 0.6) {
+        item.value = 102;
+        item.target = 102;
+        item.velocity = 0;
+      }
+      const card = cardRefs.current[index];
+      if (!card) return;
+      const ratio = Math.min(1, Math.max(0, item.value / 102));
+      card.style.transform = `translate3d(0, ${item.value}%, 0)`;
+      card.style.zIndex = String(m.zLayers[index] ?? 0);
+      card.style.setProperty("--deck-scale", `${1 + 0.055 * ratio}`);
+    });
+  }, [sites.length]);
+
+  const stopLoop = useCallback(() => {
+    const m = motion.current;
+    if (m && m.raf) cancelAnimationFrame(m.raf);
+    if (m) m.raf = 0;
+  }, []);
+
+  const tick = useCallback(
+    (now: number) => {
+      const m = motion.current;
+      if (!m) return;
+      m.raf = 0;
+      const dt = m.last ? now - m.last : 16;
+      m.last = now;
+      const { moving } = stepSprings([m.navWidth, m.navHeight, m.progress, m.body, m.iconX, ...m.cards], dt);
+      paint();
+      if (moving) {
+        m.raf = requestAnimationFrame(tick);
+      } else if (m.phase === "closing") {
+        setMounted(false);
+        setOpen(false);
+      }
+    },
+    [paint],
+  );
+
+  const run = useCallback(
+    (immediate = false) => {
+      const m = motion.current;
+      if (!m) return;
+      if (immediate || reducedRef.current) {
+        stopLoop();
+        settleSprings([m.navWidth, m.navHeight, m.progress, m.body, m.iconX, ...m.cards]);
+        paint();
+        if (m.phase === "closing") {
+          setMounted(false);
+          setOpen(false);
+        }
+        return;
+      }
+      if (!m.raf) {
+        m.last = 0;
+        m.raf = requestAnimationFrame(tick);
+      }
+    },
+    [paint, stopLoop, tick],
+  );
+
+  const applyTargets = useCallback(() => {
+    const m = motion.current;
+    const trigger = triggerRef.current;
+    if (!m || !trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    m.anchor = { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    m.geometry = measurePanel(sites.length, {
+      triggerLeft: rect.left,
+      triggerTop: rect.top,
+      viewportWidth: window.innerWidth,
+    });
+    applyPosition(panelRef.current, panelPosition(m.geometry, rect, window.innerWidth, window.innerHeight));
+    m.navWidth.target = m.geometry.listWidth;
+    m.navHeight.target = m.geometry.height;
+    m.progress.target = 1;
+    m.body.target = 1;
+    m.iconX.target = 1;
+  }, [sites.length]);
+
+  const openPanel = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    reducedRef.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const rect = trigger.getBoundingClientRect();
+    const geometry = measurePanel(sites.length, {
+      triggerLeft: rect.left,
+      triggerTop: rect.top,
+      viewportWidth: window.innerWidth,
+    });
+    const initialActive = Math.max(0, sites.findIndex((site) => isCurrent(site)));
+    motion.current = {
+      navWidth: spring(rect.width, 320, 36),
+      navHeight: spring(rect.height, 320, 36),
+      progress: spring(0, 320, 36),
+      body: spring(0, 280, 32),
+      iconX: spring(0, 320, 36),
+      cards: sites.map((_, i) => spring(i === initialActive ? 0 : 102, 260, 32)),
+      layer: 1,
+      zLayers: sites.map((_, i) => (i === initialActive ? 1 : 0)),
+      phase: "open",
+      geometry,
+      anchor: { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height },
+      raf: 0,
+      last: 0,
+    };
+    setActive(initialActive);
+    activeRef.current = initialActive;
+    setMounted(true);
+    setOpen(true);
+  }, [sites]);
+
+  const closePanel = useCallback(() => {
+    const m = motion.current;
+    const trigger = triggerRef.current;
+    if (!m || !trigger) {
+      setOpen(false);
+      setMounted(false);
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    m.phase = "closing";
+    m.navWidth.target = rect.width;
+    m.navHeight.target = rect.height;
+    m.progress.target = 0;
+    m.body.target = 0;
+    m.iconX.target = 0;
+    run();
+  }, [run]);
+
+  // 打开后：定位、设目标、动画开始、焦点落到当前站
+  useEffect(() => {
+    if (!mounted) return;
+    applyTargets();
+    if (motion.current) motion.current.phase = "open";
+    run();
+    const index = Math.max(
+      0,
+      sites.findIndex((site) => {
+        try {
+          return Boolean(host) && new URL(site.href).host === host;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    const node = listRef.current?.querySelectorAll<HTMLButtonElement>("[data-site-row]")[index];
+    node?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted]);
+
+  // 卡片上的说明文字：只有最前面那一张亮起
+  useEffect(() => {
+    cardRefs.current.forEach((node, index) => {
+      node?.classList.toggle("is-text-on", index === active);
+    });
+  }, [active, sites.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => {
+      applyTargets();
+      paint();
+    };
+    const onDown = (event: PointerEvent) => {
+      if (panelRef.current?.contains(event.target as Node)) return;
+      if (triggerRef.current?.contains(event.target as Node)) return;
+      closePanel();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      closePanel();
+      triggerRef.current?.focus({ preventScroll: true });
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", applyTargets, { passive: true });
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", applyTargets);
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, applyTargets, paint, closePanel]);
+
+  useEffect(() => () => stopLoop(), [stopLoop]);
+
+  const highlight = useCallback(
+    (index: number) => {
+      const m = motion.current;
+      if (!m || !m.cards[index] || index === activeRef.current) return;
+      activeRef.current = index;
+      setActive(index);
+      m.cards[index].target = 0;
+      m.zLayers[index] = ++m.layer;
+      run();
+    },
+    [run],
+  );
+
+  const pick = useCallback(
+    (site: MenuSite) => {
+      closePanel();
+      openMenuSite(site, mode);
+    },
+    [closePanel, mode],
+  );
+
+  const rows = sites.map((site, index) => {
+    const current = isCurrent(site);
+    return (
       <button
+        key={site.id}
         type="button"
-        className="icon-btn"
-        aria-label="切换站点"
-        aria-expanded={open}
-        title="切换站点"
-        onClick={() => setOpen((value) => !value)}
+        role="menuitem"
+        data-site-row
+        className={`site-row${index === active ? " is-active" : ""}`}
+        aria-current={current ? "true" : undefined}
+        onPointerEnter={() => highlight(index)}
+        onFocus={() => highlight(index)}
+        onClick={() => pick(site)}
       >
-        {ICON_SWAP}
+        <span className="site-names">
+          <b>{site.title}</b>
+          {site.subtitle ? <small>{site.subtitle}</small> : null}
+        </span>
+        {current ? <span className="site-dot" aria-label="当前" /> : null}
       </button>
+    );
+  });
 
-      {open ? (
-        <div className="site-panel" role="menu">
-          <div className="site-cap">JIYI · 站点</div>
-
-          <SiteRow
-            site={menu?.hub ?? NAV_MENU_FALLBACK.hub}
-            current={false}
-            onPick={() => openMenuSite(menu?.hub ?? NAV_MENU_FALLBACK.hub, menu?.openMode ?? "newTab")}
+  const cards = sites.map((site, index) => {
+    const cover = coverOf(site.thumb);
+    return (
+      <div
+        key={site.id}
+        ref={(node) => {
+          cardRefs.current[index] = node;
+        }}
+        className="site-card"
+        aria-hidden="true"
+      >
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            onError={(event) => {
+              const node = event.currentTarget;
+              if (node.dataset.fallback === "1" || node.src === site.thumb) return;
+              node.dataset.fallback = "1";
+              node.src = site.thumb;
+            }}
           />
+        ) : null}
+        <span className="site-card-cap">
+          <small>{site.subtitle}</small>
+          <b>{site.title}</b>
+        </span>
+      </div>
+    );
+  });
 
-          {menu && menu.sites.length === 0 ? (
-            <p className="site-empty">菜单里还没有别的站点，去导航台的「设置 → 站点」里勾选。</p>
-          ) : null}
+  const loading = open && !menu;
 
-          {menu?.sites.map((site) => (
-            <SiteRow
-              key={site.id}
-              site={site}
-              current={isCurrent(site)}
-              onPick={() => openMenuSite(site, menu?.openMode ?? "newTab")}
-            />
-          ))}
+  return (
+    <>
+      <span className={`site-wrap${mobile ? " is-mobile" : ""}`}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className="icon-btn"
+          aria-label="切换站点"
+          aria-expanded={open}
+          title="切换站点"
+          onClick={() => (openRef.current ? closePanel() : openPanel())}
+        >
+          <span ref={iconRef}>{ICON_SWAP}</span>
+        </button>
+      </span>
 
-          {failed ? <p className="site-empty">没取到站点列表，先用内置的三个入口。</p> : null}
-        </div>
-      ) : null}
-    </span>
+      {mounted
+        ? createPortal(
+            <div
+              ref={panelRef}
+              className="site-panel"
+              role="dialog"
+              aria-label="切换站点"
+              style={{ width: 0, height: 0, opacity: 0 }}
+            >
+              <div ref={listRef} className="site-list" role="menu">
+                {loading ? <p className="site-empty">正在取站点列表…</p> : null}
+                {rows}
+                {menu && sites.length === 0 ? (
+                  <p className="site-empty">菜单里还没有别的站点，去导航台的「设置 → 站点」里勾选。</p>
+                ) : null}
+                {failed ? <p className="site-note">没取到站点列表，先用内置的三个入口。</p> : null}
+              </div>
+              <div ref={deckRef} className="site-deck">
+                <div className="site-deck-inner">{cards}</div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
+
+export const SITE_SWITCHER_ANCHOR_OFFSET = ANCHOR_OFFSET;
