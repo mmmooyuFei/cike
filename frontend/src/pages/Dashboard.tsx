@@ -175,7 +175,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
             <div>
               <i>01</i>
               <b>随手记一件</b>
-              <span>点「记一笔」，待办、专注、日志都能记。</span>
+              <span>点「记一笔」，短期待办、专注、日志都能记。</span>
             </div>
             <div>
               <i>02</i>
@@ -193,7 +193,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
 
       <div className="kpi-grid">
         <div className="kpi">
-          <div className="label">待办</div>
+          <div className="label">短期待办</div>
           <div className="value">
             {kpi.todo_open}
             <span>件未完成</span>
@@ -364,7 +364,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
             <div className="panel-body">
               {data.todos.length === 0 ? (
                 <div className="empty small">
-                  <b>今天还没有待办</b>
+                  <b>今天还没有短期待办</b>
                   <p>只登记明天有人问起来答不上来会出问题的那种事。</p>
                 </div>
               ) : (
@@ -539,7 +539,7 @@ export function Dashboard({ ctx }: { ctx: AppContextValue }) {
       </div>
       <div className="quick-row">
         {[
-          ["todos", "☷", "待办"],
+          ["todos", "☷", "短期待办"],
           ["habits", "◈", "坚持打卡"],
           ["focus", "◷", "专注"],
           ["daily", "✎", "日志"],

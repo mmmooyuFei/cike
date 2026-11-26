@@ -112,7 +112,7 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
           type="search"
           value={query}
           placeholder="搜索标题、备注、分类…"
-          aria-label="搜索待办"
+          aria-label="搜索短期待办"
           onChange={(event) => setQuery(event.target.value)}
         />
         <button type="button" className="primary" onClick={() => ctx.openForm("todos")}>
@@ -136,7 +136,7 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
         </div>
       ) : visible.length === 0 ? (
         <div className="panel empty">
-          <b>{text ? "没有匹配的待办" : filter === "done" ? "还没有完成的事" : "这个筛选下没有待办"}</b>
+          <b>{text ? "没有匹配的短期待办" : filter === "done" ? "还没有完成的事" : "这个筛选下没有短期待办"}</b>
           <p>{text ? "换个关键词，或清空搜索。" : "只登记明天有人问起来答不上来会出问题的那种事。"}</p>
           <div className="ex-list">
             {["确认 12 月排产计划", "回访杭州代工厂", "看完组织架构方案"].map((example) => (
@@ -144,7 +144,7 @@ export function Todos({ ctx }: { ctx: AppContextValue }) {
             ))}
           </div>
           <button type="button" className="primary" onClick={() => ctx.openForm("todos")}>
-            新增待办
+            新增短期待办
           </button>
         </div>
       ) : (

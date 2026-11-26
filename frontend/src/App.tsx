@@ -39,7 +39,7 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { key: "dashboard", label: "驾驶舱", group: "今天", title: "今天要推进什么？", sub: "先看一眼今天的量，做了多少记多少。", module: "dashboard" },
-  { key: "todos", label: "待办", group: "今天", title: "今天要处理什么？", sub: "没做完的会一直留在这里提醒你。", module: "todos" },
+  { key: "todos", label: "短期待办", group: "今天", title: "今天要处理什么？", sub: "没做完的会一直留在这里提醒你。", module: "todos" },
   { key: "habits", label: "坚持打卡", group: "推进", title: "这个月坚持了几件事？", sub: "把想坚持的事列出来，每天做到就点一下打卡。", module: "habits" },
   { key: "milestones", label: "里程碑", group: "推进", title: "这一年想做成什么？", sub: "只写真正在乎的，五件起。", module: "milestones" },
   { key: "daily", label: "每日日志", group: "记录", title: "今天怎么样？", sub: "三个框：今天做了什么、明天打算、卡在哪。", module: "daily" },
@@ -425,7 +425,7 @@ export default function App() {
 function labelOf(module: string): string {
   return (
     {
-      todos: "待办",
+      todos: "短期待办",
       habits: "坚持事项",
       milestones: "里程碑",
       daily: "每日日志",
@@ -558,7 +558,7 @@ function Login({
           </div>
         </div>
         <h1>先记下此刻。</h1>
-        <p>待办、日志、睡眠、专注、健身与资金，按天收好；数据只属于登录的人。</p>
+        <p>短期待办、日志、睡眠、专注、健身与资金，按天收好；数据只属于登录的人。</p>
         {inFlight ? <div className="login-error">另一个标签页正在登录，请稍候…</div> : null}
         {error ? <div className="login-error">{error}</div> : null}
         {mode.dev_auth ? (

@@ -218,7 +218,7 @@ export function Account({ ctx }: { ctx: AppContextValue }) {
         <div className="panel-body">
           <div className="btn-row wrap">
             <a className="btn" href="/api/export" download>导出全部 JSON</a>
-            <a className="btn" href="/api/export/todos.csv" download>导出待办 CSV</a>
+            <a className="btn" href="/api/export/todos.csv" download>导出短期待办 CSV</a>
             <button type="button" onClick={() => void logout()}>退出登录</button>
           </div>
         </div>

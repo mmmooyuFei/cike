@@ -145,7 +145,7 @@ export function Avatar({
 
 export const MODULE_LABELS: Record<string, string> = {
   dashboard: "驾驶舱",
-  todos: "待办",
+  todos: "短期待办",
   habits: "坚持打卡",
   milestones: "里程碑",
   daily: "每日日志",
@@ -332,7 +332,7 @@ export function RecordForm({
 
 export function Picker({ onPick }: { onPick: (module: string) => void }) {
   const items = [
-    ["todos", "待办", "一件要去做的事"],
+    ["todos", "短期待办", "最近几天要去做的事"],
     ["habits", "坚持事项", "想长期坚持、每天打卡的事"],
     ["focus", "专注学习", "刚做完的一段专注 / 学到的一样东西"],
     ["daily", "每日日志", "今天做了什么、明天打算、卡在哪"],
@@ -349,7 +349,7 @@ export function Picker({ onPick }: { onPick: (module: string) => void }) {
           <span>{desc}</span>
         </button>
       ))}
-      <div className="tip">不知道记哪一类：今天做完的事放「专注」，要别人配合的事放「待办」，自己的状态放「每日日志」。</div>
+      <div className="tip">不知道记哪一类：今天做完的事放「专注」，要别人配合的事放「短期待办」，自己的状态放「每日日志」。</div>
     </div>
   );
 }

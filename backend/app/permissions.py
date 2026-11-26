@@ -10,7 +10,7 @@ from .security import current_user, is_admin
 
 MODULES: list[dict[str, str]] = [
     {"key": "dashboard", "label": "驾驶舱"},
-    {"key": "todos", "label": "待办"},
+    {"key": "todos", "label": "短期待办"},
     {"key": "habits", "label": "坚持打卡"},
     {"key": "milestones", "label": "里程碑"},
     {"key": "daily", "label": "每日日志"},
