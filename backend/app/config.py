@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     app_git_commit: str = ""
     update_repo_dir: str = ""
     update_allow_restart: bool = False
+    # 拉取后自动重建（需宿主机安装 scripts/install-update-runner.sh 的执行器）
+    update_allow_rebuild: bool = True
 
     @property
     def data_path(self) -> Path:

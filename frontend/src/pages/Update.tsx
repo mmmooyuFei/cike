@@ -21,12 +21,28 @@ type RepoState = {
   sync?: { ahead: number; behind: number } | null;
 };
 
+type RebuildState = {
+  state: "idle" | "queued" | "running" | "success" | "failed";
+  from: string;
+  to: string;
+  trigger: string;
+  requested_at: string;
+  started_at: string;
+  finished_at: string;
+  duration_s: number | null;
+  error: string;
+  log_tail: string;
+  available: boolean;
+  runner: { installed: boolean; name: string; installed_at: string };
+};
+
 type UpdateStatus = {
   running: { commit: string; commit_short: string; deployment: string };
   repo: RepoState;
   hint: string | null;
-  capabilities: { fetch: boolean; pull: boolean; restart: boolean };
-  commands: { update: string; health: string; enable_repo: string };
+  capabilities: { fetch: boolean; pull: boolean; rebuild: boolean; restart: boolean };
+  commands: { update: string; install_runner: string; health: string; enable_repo: string };
+  rebuild: RebuildState;
   checked_at: string;
 };
 
@@ -38,6 +54,8 @@ const REASON_TEXT: Record<string, string> = {
   not_a_git_repository: "UPDATE_REPO_DIR 不是 Git 仓库。",
 };
 
+const POLL_MS = 4000;
+
 function syncText(repo: RepoState): string {
   if (!repo.available) return "—";
   if (!repo.sync) return "未比较远端";
@@ -48,40 +66,102 @@ function syncText(repo: RepoState): string {
   return parts.join(" · ");
 }
 
+function secondsText(value: number | null): string {
+  if (!value || value < 0) return "";
+  if (value < 60) return `${Math.round(value)} 秒`;
+  return `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒`;
+}
+
+function recentIso(iso: string, hours = 24): boolean {
+  if (!iso) return false;
+  const stamp = Date.parse(iso);
+  if (Number.isNaN(stamp)) return false;
+  return Date.now() - stamp < hours * 3600 * 1000;
+}
+
 export function Update({ ctx }: { ctx: AppContextValue }) {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"fetch" | "pull" | "restart" | null>(null);
+  const [busy, setBusy] = useState<"fetch" | "pull" | "rebuild" | "restart" | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [settled, setSettled] = useState<"success" | "failed" | null>(null);
+  const [giveUp, setGiveUp] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const loadCommits = async () => {
+    try {
+      const log = await api.get<{ items: Commit[] }>("/update/commits?limit=15");
+      setCommits(log.items);
+    } catch {
+      setCommits([]);
+    }
+  };
+
+  const readStatus = async (quiet = false, withCommits = true) => {
+    if (!quiet) setLoading(true);
     try {
       const payload = await api.get<UpdateStatus>("/update/status");
       setStatus(payload);
-      if (payload.repo.available) {
-        try {
-          const log = await api.get<{ items: Commit[] }>("/update/commits?limit=15");
-          setCommits(log.items);
-        } catch {
-          setCommits([]);
-        }
-      } else {
-        setCommits([]);
-      }
+      setError("");
+      if (payload.repo.available && withCommits) void loadCommits();
+      else if (!payload.repo.available) setCommits([]);
+      return payload;
     } catch (err) {
-      setError(errorText(err));
+      if (!quiet) setError(errorText(err));
+      return null;
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   };
 
   useEffect(() => {
-    void load();
+    void readStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx.refreshKey]);
+
+  // 重建期间轮询：容器重建时请求会断开，重试到拿到终态为止
+  useEffect(() => {
+    if (!polling) return;
+    let alive = true;
+    let ticks = 0;
+    const tick = async () => {
+      ticks += 1;
+      if (ticks > (15 * 60 * 1000) / POLL_MS) {
+        setPolling(false);
+        setGiveUp(true);
+        ctx.toast("重建超过 15 分钟仍未结束，检查 systemctl status cike-update-wake.path");
+        return;
+      }
+      const payload = await readStatus(true, false);
+      if (!alive || !payload) return;
+      const state = payload.rebuild.state;
+      if (state === "success" || state === "failed") {
+        setPolling(false);
+        setSettled(state);
+        void readStatus(true, true);
+        ctx.toast(
+          state === "success"
+            ? `已更新到 ${payload.rebuild.to || payload.running.commit_short}`
+            : "重建失败，已回滚到原镜像，详情见更新管理",
+        );
+      }
+    };
+    const timer = window.setInterval(() => void tick(), POLL_MS);
+    void tick();
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polling]);
+
+  // 刷新页面时如果重建还在跑，接着把进度轮询下去
+  useEffect(() => {
+    if (!status || polling || giveUp) return;
+    if (status.rebuild.state === "queued" || status.rebuild.state === "running") setPolling(true);
+  }, [status, polling, giveUp]);
 
   const copy = async (text: string, label: string) => {
     try {
@@ -97,7 +177,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
     try {
       const result = await api.post<{ sync: { ahead: number; behind: number } | null }>("/update/fetch");
       ctx.toast(result.sync?.behind ? `远端有 ${result.sync.behind} 个新提交` : "已是最新");
-      await load();
+      await readStatus();
     } catch (err) {
       ctx.toast(errorText(err));
     } finally {
@@ -105,13 +185,57 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
     }
   };
 
+  const startPolling = () => {
+    setSettled(null);
+    setGiveUp(false);
+    setPolling(true);
+  };
+
   const pull = async () => {
-    if (!window.confirm("会用 git pull --ff-only 更新仓库；之后还需要在服务器执行 bash scripts/update.sh 重建镜像。继续？")) return;
+    const willRebuild = Boolean(status?.capabilities.rebuild);
+    const question = willRebuild
+      ? "会先 git pull --ff-only，再自动执行安全重建：备份数据库 → 构建镜像 → 重建容器 → 健康检查，失败自动回滚上一镜像。重建期间站点会短暂重启。继续？"
+      : "会用 git pull --ff-only 更新仓库。当前没有可用的宿主机重建执行器，拉取后不会自动生效。继续？";
+    if (!window.confirm(question)) return;
     setBusy("pull");
     try {
-      const result = await api.post<{ changed: boolean; before: string; after: string }>("/update/pull");
-      ctx.toast(result.changed ? `已拉取 ${result.before} → ${result.after}，请执行 update.sh 重建镜像` : "已经是最新版本");
-      await load();
+      const result = await api.post<{
+        changed: boolean;
+        before: string;
+        after: string;
+        rebuild: { queued: boolean; reason?: string };
+      }>("/update/pull");
+      if (result.rebuild?.queued) {
+        ctx.toast("已拉取代码，正在自动重建，页面会自己更新");
+        startPolling();
+      } else if (result.changed) {
+        ctx.toast(`已拉取 ${result.before} → ${result.after}`);
+      } else {
+        ctx.toast("已经是最新版本");
+      }
+      await readStatus();
+    } catch (err) {
+      ctx.toast(errorText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rebuildNow = async () => {
+    if (!window.confirm("会备份数据库、重建镜像并重建容器，期间站点短暂重启，失败自动回滚。继续？")) return;
+    setBusy("rebuild");
+    try {
+      const result = await api.post<{ queued: boolean; reason?: string; rebuild?: { queued: boolean; reason?: string } }>(
+        "/update/rebuild",
+      );
+      const queued = result.queued ?? result.rebuild?.queued;
+      if (queued) {
+        ctx.toast("已排队重建，页面会自己更新");
+        startPolling();
+      } else {
+        ctx.toast(result.reason === "already_running" ? "运行版本已经是仓库最新提交" : "没有开始重建");
+      }
+      await readStatus();
     } catch (err) {
       ctx.toast(errorText(err));
     } finally {
@@ -146,7 +270,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
       <div className="panel empty">
         <b>读取更新状态失败</b>
         <p>{error}</p>
-        <button type="button" className="primary" onClick={() => void load()}>重试</button>
+        <button type="button" className="primary" onClick={() => void readStatus()}>重试</button>
       </div>
     );
   }
@@ -154,17 +278,29 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
   if (!status) return null;
 
   const repo = status.repo;
+  const rebuild = status.rebuild;
   const behind = repo.sync?.behind ?? 0;
   const outdated = status.hint === "running_commit_differs";
-  const state = !repo.available
-    ? { text: "未挂载仓库", tone: "muted" }
-    : outdated
-      ? { text: "仓库已更新，待重建", tone: "warn" }
-      : behind > 0
-        ? { text: `落后 ${behind} 个提交`, tone: "warn" }
-        : { text: "已是最新", tone: "ok" };
+  const rebuilding = polling || rebuild.state === "queued" || rebuild.state === "running";
+  const failed =
+    !rebuilding &&
+    rebuild.state === "failed" &&
+    Boolean(rebuild.to) &&
+    !rebuild.to.startsWith(status.running.commit_short || "\u0000") &&
+    recentIso(rebuild.finished_at);
+  const finished = !rebuilding && rebuild.state === "success" && settled === "success";
+  const state = rebuilding
+    ? { text: "正在重建", tone: "warn" }
+    : !repo.available
+      ? { text: "未挂载仓库", tone: "muted" }
+      : outdated
+        ? { text: "仓库已更新，待重建", tone: "warn" }
+        : behind > 0
+          ? { text: `落后 ${behind} 个提交`, tone: "warn" }
+          : { text: "已是最新", tone: "ok" };
   const deployment = status.running.deployment === "docker" ? "Docker 容器" : "主机进程";
   const runningShort = status.running.commit_short || "—";
+  const pullLabel = busy === "pull" ? "拉取中…" : status.capabilities.rebuild ? "拉取并重建" : "拉取更新";
 
   return (
     <div className="upd">
@@ -201,10 +337,15 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
           </div>
         </div>
         <div className="upd-actions">
-          <button type="button" className="primary" disabled={!status.capabilities.pull || busy !== null} onClick={() => void pull()}>
-            {busy === "pull" ? "拉取中…" : "拉取更新"}
+          <button
+            type="button"
+            className="primary"
+            disabled={!status.capabilities.pull || busy !== null || rebuilding}
+            onClick={() => void pull()}
+          >
+            {pullLabel}
           </button>
-          <button type="button" disabled={!status.capabilities.fetch || busy !== null} onClick={() => void checkRemote()}>
+          <button type="button" disabled={!status.capabilities.fetch || busy !== null || rebuilding} onClick={() => void checkRemote()}>
             {busy === "fetch" ? "检查中…" : "检查远端"}
           </button>
           <button type="button" onClick={() => void copy(status.commands.update, "更新命令")}>复制更新命令</button>
@@ -217,7 +358,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
           >
             {busy === "restart" ? "重启中…" : "重启服务"}
           </button>
-          <button type="button" className="ghost" disabled={loading} onClick={() => void load()}>
+          <button type="button" className="ghost" disabled={loading} onClick={() => void readStatus()}>
             {loading ? "刷新中…" : "刷新"}
           </button>
         </div>
@@ -230,7 +371,58 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
           {" "}在 <code>docker-compose.yml</code> 挂载仓库并设置 <code>UPDATE_REPO_DIR</code> 后可查看分支与提交。
         </div>
       ) : null}
-      {outdated ? <div className="note">仓库 HEAD 与运行版本不一致：代码已经更新，但镜像还是旧的。执行 <code>{status.commands.update}</code> 重建。</div> : null}
+
+      {rebuilding ? (
+        <div className="note">
+          <b>正在安全重建</b>
+          ：「拉取并重建」已交给宿主机执行器，顺序是备份数据库 → 构建镜像（写入提交号 {rebuild.to || "…"}）→ 重建容器 → 健康检查，
+          任一步失败会自动回滚上一镜像。容器重建时本站会短暂断开，本页会自己恢复。
+        </div>
+      ) : null}
+
+      {failed ? (
+        <div className="note">
+          <b>上次重建失败</b>
+          {rebuild.error ? `（${rebuild.error}）` : null}
+          ：脚本已按自身流程回滚，站点还在 {runningShort} 上运行。日志末尾可直接查看。
+          <button type="button" className="ghost" onClick={() => setLogOpen((open) => !open)}>
+            {logOpen ? "收起日志" : "查看日志"}
+          </button>
+          {logOpen && rebuild.log_tail ? <pre className="upd-log">{rebuild.log_tail}</pre> : null}
+        </div>
+      ) : null}
+
+      {finished ? (
+        <div className="note">
+          <b>已更新到 {rebuild.to || runningShort}</b>
+          {rebuild.duration_s ? `，用时 ${secondsText(rebuild.duration_s)}` : null}
+          。备份与镜像都留在服务器上，需要回退时可用上一镜像。
+        </div>
+      ) : null}
+
+      {!rebuilding && !failed && outdated ? (
+        <div className="note">
+          仓库 HEAD 与运行版本不一致：代码已经更新到 {repo.commit_short || "新提交"}，但镜像还是 {runningShort}。
+          {status.capabilities.rebuild ? (
+            <>
+              {" "}
+              <button type="button" className="ghost" disabled={busy !== null} onClick={() => void rebuildNow()}>
+                {busy === "rebuild" ? "排队中…" : "重建并上线"}
+              </button>
+            </>
+          ) : (
+            <> 这台服务器还没安装重建执行器：<code>{status.commands.install_runner}</code>，装好后页面就能一键完成。</>
+          )}
+        </div>
+      ) : null}
+
+      {!status.capabilities.rebuild && repo.available && !outdated ? (
+        <div className="note">
+          当前没有宿主机重建执行器，页面只能拉取代码、不能自动生效。在服务器上执行
+          {" "}<code>{status.commands.install_runner}</code> 安装后，「拉取更新」会自动完成备份、重建与健康检查。
+        </div>
+      ) : null}
+
       {status.hint === "repo_readonly" ? (
         <div className="note">仓库是只读挂载：可以看提交记录，但无法发「检查远端 / 拉取更新」。需要拉取时把挂载改成 <code>:rw</code>。</div>
       ) : null}
@@ -243,7 +435,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
                 <h3>最近提交</h3>
                 <p>{repo.available ? `${repo.upstream || "origin"} · 最多 15 条` : "未挂载仓库"}</p>
               </div>
-              <button type="button" className="ghost" disabled={!repo.available || loading} onClick={() => void load()}>
+              <button type="button" className="ghost" disabled={!repo.available || loading} onClick={() => void readStatus()}>
                 刷新
               </button>
             </div>
@@ -308,6 +500,12 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
                 <dd className={repo.dirty ? "bad" : "good"}>{repo.available ? (repo.dirty ? `${repo.dirty_files} 个未提交改动` : "干净") : "—"}</dd>
               </div>
               <div>
+                <dt>执行器</dt>
+                <dd className={rebuild.available ? "good" : "bad"}>
+                  {rebuild.runner.installed ? `已安装 · ${rebuild.runner.name || "宿主执行器"}` : "未安装"}
+                </dd>
+              </div>
+              <div>
                 <dt>远端</dt>
                 <dd className="mono">{repo.remote || "—"}</dd>
               </div>
@@ -322,7 +520,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
             <div className="upd-card-head">
               <div>
                 <h3>更新流程</h3>
-                <p>重建镜像仍走服务器脚本</p>
+                <p>页面点一下，宿主机按这个顺序跑完</p>
               </div>
               <button type="button" className="ghost" onClick={() => void copy(status.commands.update, "更新命令")}>
                 复制
@@ -336,8 +534,9 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
               <li><b>失败回滚</b>到上一个镜像</li>
             </ol>
             <div className="upd-note">
-              页面上的「拉取更新」只更新仓库；重建镜像与健康检查请执行
-              <code>{status.commands.update}</code>。
+              {status.capabilities.rebuild
+                ? "「拉取并重建」只更新仓库并落一个唤醒文件，真正的构建在宿主机上执行（应用容器不持有 docker 权限）；进度与日志回写到数据目录，所以这一页刷新后仍能看到结果。"
+                : `重建目前还没接上宿主机执行器：先执行 ${status.commands.install_runner}，页面才能一键完成；在那之前用 ${status.commands.update} 手动更新。`}
             </div>
           </section>
 

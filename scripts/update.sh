@@ -56,5 +56,13 @@ info "健康检查失败，回滚上一镜像"
 if docker image inspect cike:previous >/dev/null 2>&1; then
   docker tag cike:previous "$IMAGE"
   docker compose up -d || true
+  deadline=$((SECONDS + 90))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' cike 2>/dev/null || echo missing)" = "healthy" ]; then
+      info "已回滚到上一镜像并恢复健康"
+      break
+    fi
+    sleep 2
+  done
 fi
 fail "healthcheck_failed"

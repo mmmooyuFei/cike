@@ -15,7 +15,7 @@
 - 资金：按账户记录月度期初 / 期末，自动计算净变动与个人总余额（各账户最新期末加总）
 - 账号：资料、头像（支持透明底 PNG）、密码、角色与访问范围
 - 站点管理：管理员配置品牌名称 / 副标题 / LOGO，以及按 Casdoor 角色 / 群组限制模块可见与可编辑
-- 更新管理：管理员查看运行版本、仓库状态与最近提交；挂载仓库后可检查远端并 `git pull`
+- 更新管理：管理员查看运行版本、仓库状态与最近提交；拉取后由宿主机执行器自动完成安全重建（备份 → 构建 → 重建 → 健康检查，失败回滚）
 - 数据：按登录用户隔离；软删除可撤销；支持 JSON / CSV 导出
 
 ## 技术栈
@@ -117,6 +117,7 @@ bash scripts/1panel-site.sh
 | `BRAND_DEFAULT_SUBTITLE` | 否 | 默认副标题，默认「笔记 · 备忘录」 |
 | `APP_TIMEZONE` | 否 | 计算“今天”所用时区，默认 `Asia/Shanghai`；不依赖容器 `TZ` |
 | `UPDATE_REPO_DIR` | 否 | 容器内挂载的仓库路径；设置后「更新管理」可检查远端 / 拉取 |
+| `UPDATE_ALLOW_REBUILD` | 否 | 是否允许「拉取并重建」，默认 `true`；真正可用还需在宿主机安装执行器 |
 | `UPDATE_ALLOW_RESTART` | 否 | 是否允许页面重启进程，默认 `false`（需容器 restart 策略） |
 | `APP_GIT_COMMIT` | 否 | 构建时写入的提交号，由 `update.sh` 传入，无需手工填 |
 | `DATA_DIR` | 否 | 运行期数据目录，默认 `data` |
@@ -134,18 +135,41 @@ bash scripts/1panel-site.sh
 bash scripts/update.sh
 ```
 
-流程：拉取代码 → `pg_dump` 备份 → 构建镜像（写入提交号 `GIT_COMMIT`）→ 重建容器 → 健康检查；失败时回滚上一镜像。备份保留最近 10 份。
+流程：拉取代码 → `pg_dump` 备份 → 构建镜像（写入提交号 `GIT_COMMIT`）→ 重建容器 → 健康检查；失败时回滚上一镜像并再次等待健康。备份保留最近 10 份。
+
+同样的流程也可以在「管理 → 更新管理」里点一下完成，见下节。
+
+### 宿主执行器（页面自动重建）
+
+重建要重建的是应用自己的容器，容器里的进程会被一起杀掉，所以构建不能跑在应用容器里，也不能把 docker socket 交给它。这里的做法是：
+
+1. 页面「拉取并重建」只做两件事：`git pull --ff-only`，然后往数据目录落一个唤醒文件 `data/update-wake/request.json`；
+2. 宿主机的 systemd path 单元（`cike-update-wake.path`）看到唤醒文件，触发 `cike-update.service` 在容器之外执行 `scripts/update-dispatch.sh` → `scripts/update.sh`；
+3. 执行器把进度写进 `data/update-status.json`、日志写进 `data/update.log`，页面轮询这两个文件显示「正在重建 / 已更新到 xxxx / 重建失败并已回滚」。
+
+安装（需要 root，一次性）：
+
+```bash
+cd /path/to/cike
+sudo bash scripts/install-update-runner.sh
+```
+
+它会按仓库实际路径生成 `cike-update-wake.path` 与 `cike-update.service`，并在 `data/update-runner.json` 写入标记；页面看到标记才开放「拉取并重建」，没装时只会显示安装命令，不会假装能更新。
+
+- 同一时间只允许一轮重建（`/var/lock/cike-update.lock`）。
+- 构建失败或健康检查不过时，`update.sh` 自动回滚上一镜像，站点留在旧版本上。
+- 手动跑 `sudo systemctl start cike-update.service` 可直接触发一次，适合验证执行器是否装好。
 
 ### 更新管理页面
 
 管理员可在「管理 → 更新管理」查看：
 
 - 运行版本：镜像构建时写入的提交号与部署方式
-- 仓库状态：分支 / 当前提交 / 提交时间 / 未提交改动 / 远端地址（不含凭据）
+- 仓库状态：分支 / 当前提交 / 提交时间 / 未提交改动 / 执行器是否安装 / 远端地址（不含凭据）
 - 最近提交，以及当前运行提交是否与仓库 HEAD 一致
-- 「检查远端」「拉取更新」：`docker-compose.yml` 已把项目目录挂到容器 `/repo`（`UPDATE_REPO_DIR=/repo`），页面可以直接执行 `git fetch` / `git pull --ff-only`
+- 「检查远端」「拉取并重建」：`docker-compose.yml` 已把项目目录挂到容器 `/repo`（`UPDATE_REPO_DIR=/repo`），页面可以直接执行 `git fetch` / `git pull --ff-only`，随后自动排队重建
 
-页面上的「拉取更新」只更新仓库；重建镜像与健康检查仍走 `scripts/update.sh`。不想让页面拉代码时，把挂载改成 `./:/repo:ro` 即可（页面会显示“只读挂载”，只能看提交）。
+只想让页面看代码、不想让它更新时，把挂载改成 `./:/repo:ro`（页面会显示“只读挂载”），或在 `.env` 里设 `UPDATE_ALLOW_REBUILD=false`。
 
 「重启服务」默认关闭，需要 `UPDATE_ALLOW_RESTART=true` 且容器有 `restart` 策略。
 
@@ -179,6 +203,8 @@ backend/                 FastAPI 应用、模型、路由、测试
 frontend/                React + Vite 前端
 docs/数据库表结构.md      表、字段、约束与常用查询
 scripts/update.sh        生产更新与回滚
+scripts/update-dispatch.sh  宿主执行器：由 systemd 触发，跑 update.sh 并回报进度
+scripts/install-update-runner.sh  安装/刷新 systemd 执行器（页面自动重建依赖它）
 scripts/1panel-site.sh   1Panel 8443 站点生成
 .github/workflows/       GitHub → CNB 镜像
 docker-compose.yml
