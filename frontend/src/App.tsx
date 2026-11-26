@@ -18,6 +18,8 @@ import { Habits } from "./pages/Habits";
 import { ModulePage } from "./pages/Modules";
 import { Todos } from "./pages/Todos";
 import { Update } from "./pages/Update";
+import { SiteSwitcher } from "./SiteSwitcher";
+import { applyTheme, readTheme, saveTheme, type Theme } from "./theme";
 import type { AppContextValue, Brand, HabitItem, RecordItem } from "./types";
 
 type LoginMode = {
@@ -76,6 +78,19 @@ export default function App() {
   >(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  /**
+   * 日夜主题：初始值由 `index.html` 的首帧脚本先落到 <html> 上，这里只是接管
+   * 状态并负责后续切换。没存过 = day（这个产品的底子是暖纸色）。
+   */
+  const [theme, setTheme] = useState<Theme>(readTheme);
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+  const toggleTheme = () => {
+    const next: Theme = theme === "night" ? "day" : "night";
+    setTheme(next);
+    saveTheme(next);
+  };
   const [toastState, setToastState] = useState<{ message: string; action?: { label: string; run: () => void } } | null>(null);
   const [loginMode, setLoginMode] = useState<LoginMode | null>(null);
 
@@ -240,6 +255,29 @@ export default function App() {
             </div>
           ))}
         </nav>
+        {/* 底部工具行：日夜切换 + 站点切换（与另外两个站位置一致） */}
+        <div className="icon-row">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={toggleTheme}
+            aria-label={theme === "night" ? "切换到浅色" : "切换到深色"}
+            title={theme === "night" ? "切换到浅色" : "切换到深色"}
+          >
+            {theme === "night" ? (
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8Z" />
+              </svg>
+            )}
+          </button>
+          <SiteSwitcher />
+        </div>
+
         <button type="button" className="account-chip" onClick={() => go("account")} title="账号设置">
           <Avatar className="avatar" src={session.user.avatar_url} name={session.user.display_name} />
           <span>
@@ -259,6 +297,25 @@ export default function App() {
             </div>
           </div>
           <div className="btn-row">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={toggleTheme}
+              aria-label={theme === "night" ? "切换到浅色" : "切换到深色"}
+              title={theme === "night" ? "切换到浅色" : "切换到深色"}
+            >
+              {theme === "night" ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8Z" />
+                </svg>
+              )}
+            </button>
+            <SiteSwitcher mobile />
             <button type="button" onClick={() => setPaletteOpen(true)}>⌘K</button>
             <button type="button" className="primary" onClick={() => setSheet({ kind: "picker" })}>＋ 记一笔</button>
           </div>

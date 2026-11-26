@@ -3,8 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#16241c" />
+    <meta name="theme-color" content="#f7f5ee" />
     <title>此刻 · 笔记 · 备忘录</title>
+    <!--
+      首帧前把主题落到 <html>：暗色下若等 React 挂载再改，会先闪一帧白纸。
+      与 `src/theme.ts` 共用同一个 key 与同一套取值，默认 day（这个产品的底子
+      是暖纸色，不跟随系统 prefers-color-scheme）。
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("cike:theme");
+          var theme = saved === "night" || saved === "day" ? saved : "day";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme === "night" ? "dark" : "light";
+          if (theme === "night") {
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute("content", "#101210");
+          }
+        } catch (error) {
+          document.documentElement.dataset.theme = "day";
+        }
+      })();
+    </script>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%23f3f0e4'/%3E%3Cpath d='M29.55 10.45A13.5 13.5 0 1 1 10.45 10.45' fill='none' stroke='%231e5138' stroke-width='3.2' stroke-linecap='round'/%3E%3Ccircle cx='20' cy='6.5' r='3' fill='%23b8832f'/%3E%3C/svg%3E" />
   </head>
   <body>
