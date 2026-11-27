@@ -13,7 +13,7 @@
  * 边界：
  *   - 目标站被 `X-Frame-Options`/CSP 拦住、3s 内没加载完 → 运行时自己退回普通跳转。
  *   - `prefers-reduced-motion` → 不播过场，普通跳转。
- *   - 封面读不出像素（跨源无 CORS）→ 墨环用纯色，不影响过场。
+ *   - 洞边不画任何描边：边界就是新旧页面的交界。
  */
 
 export interface InkPoint {
@@ -26,8 +26,6 @@ export interface InkSwitchOptions {
   href: string;
   /** 鼠标点，视口坐标 px —— 墨洞的圆心 */
   point: InkPoint;
-  /** 目标站封面：读得出像素就烘进墨环 */
-  coverUrl?: string;
   /** 推开时长，默认 640ms */
   duration?: number;
 }

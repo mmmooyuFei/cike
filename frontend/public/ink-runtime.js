@@ -5,6 +5,8 @@
  *
  *   点站点 → 落点先起一颗墨珠（几百毫秒的加载反馈）→ 目标站以 iframe 提前加载（悬停时就开始），
  *   它首屏放行时给 parent 发一条 `jiyi-ink:ready`，源页收到才推开（拿不到就等 450ms 兜底）
+ *   → 一个不规则的洞从落点长出，把新站露出来。**洞边不画任何描边/色带**，
+ *   边界就是新旧两个页面的交界。
  *          → 目标站画出来后，从鼠标点推开：洞内是目标站的活页面，洞外还是当前页
  *          → 推开到满屏的同一帧 `location.assign()`，地址栏换成目标站（后退可回原页）
  *
@@ -23,7 +25,7 @@
  *   - 前进后退（bfcache）→ 恢复时把舞台摘掉。
  *
  * 对外 API（`window.JiyiInk`）：
- *   switchTo({ href, point, coverUrl })  → Promise<void>  点站点时调；内部完成加载、推开与跳转
+ *   switchTo({ href, point })            → Promise<void>  点站点时调；内部完成加载、推开与跳转
  *   warm(href)                                            面板打开 / 行悬停时预热（预加载 iframe）
  *   cancelWarm(href)                                      面板关闭时丢掉预热
  *   sameGroup(href)                                       目标是否同一站群
@@ -47,12 +49,6 @@
    * 就等这么久再推开 —— 宁可晚一点，也不要洞里先闪一下“加载中”。
    */
   var PAINT_SETTLE_MS = 450;
-  /** 墨环宽度占短边的比例（夹在下面两个值之间）。 */
-  var BAND_MIN = 14;
-  var BAND_MAX = 46;
-  /** 墨纹烘焙尺寸。 */
-  var INK_W = 384;
-  var INK_H = 240;
   /** 墨环轮廓的采样条数：越少越方，越多越贵；96 条在 60fps 下没有压力。 */
   var RAYS = 96;
 
@@ -118,17 +114,6 @@
 
   /* ============================================================ 噪声（与着色器同一条公式） */
 
-  function mulberry32(seed) {
-    var state = seed >>> 0;
-    return function random() {
-      state = (state + 0x6d2b79f5) >>> 0;
-      var t = state;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
   function hash2(x, y) {
     var value = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
     return value - Math.floor(value);
@@ -161,127 +146,6 @@
       amplitude *= 0.47;
     }
     return total;
-  }
-
-  /* ============================================================ 墨纹烘焙 */
-
-  /**
-   * 烘一张墨纹：底色渐变 + 封面暗纹（可选）+ 颗粒 + 暗角。
-   * 封面必须是像素可读的图源；读不出来（跨源无 CORS）就退回纯程序化墨纹。
-   */
-  function bakeInk(options) {
-    var settings = options || {};
-    var ink = settings.ink || INK_ON_LIGHT;
-    var cover = settings.cover || null;
-    var seed = settings.seed || 1;
-    var canvas = doc.createElement("canvas");
-    canvas.width = INK_W;
-    canvas.height = INK_H;
-    var ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-
-    var gradient = ctx.createLinearGradient(0, 0, INK_W * 0.35, INK_H);
-    gradient.addColorStop(0, ink.base);
-    gradient.addColorStop(1, ink.wash);
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, INK_W, INK_H);
-
-    var coverWidth = cover ? cover.naturalWidth || cover.width || 0 : 0;
-    var coverHeight = cover ? cover.naturalHeight || cover.height || 0 : 0;
-    if (cover && coverWidth && coverHeight) {
-      try {
-        var ratio = Math.max(INK_W / coverWidth, INK_H / coverHeight);
-        var width = coverWidth * ratio;
-        var height = coverHeight * ratio;
-        try {
-          ctx.filter = "blur(4px)";
-        } catch (error) {
-          /* 老浏览器没有 canvas filter */
-        }
-        ctx.drawImage(cover, (INK_W - width) / 2, (INK_H - height) / 2, width, height);
-        ctx.filter = "none";
-        ctx.globalCompositeOperation = "color";
-        ctx.fillStyle = ink.base;
-        ctx.fillRect(0, 0, INK_W, INK_H);
-        ctx.globalCompositeOperation = "source-over";
-        ctx.globalAlpha = 0.6;
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, INK_W, INK_H);
-        ctx.globalAlpha = 0.26;
-        ctx.fillStyle = ink.base;
-        ctx.fillRect(0, 0, INK_W, INK_H);
-        ctx.globalAlpha = 1;
-      } catch (error) {
-        return bakeInk({ ink: ink, seed: seed });
-      }
-    }
-
-    var random = mulberry32(Math.floor(seed * 9973) || 1);
-    for (var i = 0; i < 260; i += 1) {
-      ctx.globalAlpha = 0.05 + random() * 0.12;
-      ctx.fillStyle = random() > 0.5 ? ink.grain : ink.wash;
-      ctx.beginPath();
-      ctx.arc(random() * INK_W, random() * INK_H, 0.5 + random() * 2.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 0.2;
-    var vignette = ctx.createRadialGradient(
-      INK_W * 0.5,
-      INK_H * 0.5,
-      Math.min(INK_W, INK_H) * 0.3,
-      INK_W * 0.5,
-      INK_H * 0.5,
-      Math.max(INK_W, INK_H) * 0.72,
-    );
-    vignette.addColorStop(0, "rgba(0,0,0,0)");
-    vignette.addColorStop(1, "rgba(0,0,0,1)");
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, INK_W, INK_H);
-    ctx.globalAlpha = 1;
-
-    return { canvas: canvas };
-  }
-
-  /** 封面探测按 URL 缓存：同一次会话每个地址只试一次。 */
-  var coverCache = {};
-  var coverFailed = {};
-
-  function fetchCover(url) {
-    try {
-      return global
-        .fetch(url, { mode: "cors", credentials: "omit" })
-        .then(function (response) {
-          if (!response.ok) throw new Error("cover " + response.status);
-          return response.blob();
-        })
-        .then(function (blob) {
-          return global.createImageBitmap(blob);
-        })
-        .catch(function () {
-          coverFailed[url] = true;
-          return null;
-        });
-    } catch (error) {
-      coverFailed[url] = true;
-      return Promise.resolve(null);
-    }
-  }
-
-  function loadCover(url) {
-    if (!url || typeof global.fetch !== "function" || typeof global.createImageBitmap !== "function") {
-      return Promise.resolve(null);
-    }
-    if (coverFailed[url]) return Promise.resolve(null);
-    if (!coverCache[url]) coverCache[url] = fetchCover(url);
-    var pending = coverCache[url];
-    return Promise.race([
-      pending,
-      new Promise(function (resolve) {
-        global.setTimeout(function () {
-          resolve(null);
-        }, 320);
-      }),
-    ]);
   }
 
   /* ============================================================ 预热：把目标站先拉起来 */
@@ -336,28 +200,28 @@
 
   var stage = null;
 
+  /**
+   * 舞台：一个铺满视口的 iframe + 一层挡交互的透明遮罩。
+   *
+   * **不画墨边**：洞的边界就是两个页面的交界，没有任何描边、阴影或色带。
+   * 形状由 `holePolygon()` 决定，逐帧写进 iframe 的 `clip-path`。
+   */
   function createStage(state) {
     var frame = state.frame;
-    var canvas = doc.createElement("canvas");
-    canvas.setAttribute("aria-hidden", "true");
-    canvas.dataset.jiyiInkStage = "1";
-    canvas.style.cssText =
-      "position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:" +
-      (Z_INDEX + 2) +
-      ";pointer-events:none;display:block";
-    // 拦截旧页的一切交互：推开过程中旧页不该被点到
     var shield = doc.createElement("div");
     shield.dataset.jiyiInkStage = "1";
+    shield.setAttribute("aria-hidden", "true");
     shield.style.cssText =
-      "position:fixed;inset:0;z-index:" + (Z_INDEX + 1) + ";pointer-events:auto;touch-action:none;background:transparent";
+      "position:fixed;inset:0;z-index:" +
+      (Z_INDEX + 1) +
+      ";pointer-events:auto;touch-action:none;background:transparent";
     frame.style.display = "block";
     frame.style.opacity = "1";
     frame.style.pointerEvents = "none";
     // 起始状态：洞还没开
     frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
     doc.body.appendChild(shield);
-    doc.body.appendChild(canvas);
-    return { frame: frame, canvas: canvas, shield: shield };
+    return { frame: frame, shield: shield };
   }
 
   /**
@@ -426,37 +290,6 @@
   }
 
   /** 墨环：沿洞边画一圈湿墨，把 iframe 的硬裁切边盖掉。 */
-  function paintBand(ctx, points, geometry) {
-    var width = geometry.width;
-    var height = geometry.height;
-    ctx.clearRect(0, 0, width, height);
-    ctx.save();
-    ctx.beginPath();
-    for (var i = 0; i < points.length; i += 1) {
-      if (i === 0) ctx.moveTo(points[i][0], points[i][1]);
-      else ctx.lineTo(points[i][0], points[i][1]);
-    }
-    ctx.closePath();
-    var band = Math.max(BAND_MIN, Math.min(BAND_MAX, Math.min(width, height) * 0.038));
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    // 羽化不走 `ctx.filter = blur()`：每帧一次全屏高斯，软件渲染下会把整段动画饿死。
-    // 改成同一路径由粗到细描四道，外圈淡、内圈实，读起来仍是一条湿边。
-    var passes = [
-      [1, 0.34],
-      [0.72, 0.5],
-      [0.42, 0.66],
-      [0.16, 0.8],
-    ];
-    for (var k = 0; k < passes.length; k += 1) {
-      ctx.lineWidth = band * passes[k][0];
-      ctx.globalAlpha = passes[k][1];
-      ctx.strokeStyle = geometry.pattern || geometry.ink.base;
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
   /**
    * 落点的墨珠：点击那一刻先给一个反馈。
    *
@@ -515,8 +348,7 @@
    * @param {object} options
    * @param {string} options.href              目标地址
    * @param {{x:number,y:number}} options.point 鼠标点（视口 px）
-   * @param {string} [options.coverUrl]        目标站封面（读得出像素就烘进墨环）
-   * @param {number} [options.roughness]       墨边粗糙度 0..1
+     * @param {number} [options.roughness]       墨边粗糙度 0..1
    * @param {number} [options.duration]        推开时长
    * @returns {Promise<{skipped?: string}>}
    */
@@ -564,59 +396,36 @@
       function start() {
         if (settled) return;
         pendingStart = null;
-        loadCover(settings.coverUrl).then(function (cover) {
-          if (settled) return;
-          if (bead) bead.remove();
-          var baked = bakeInk({ ink: inkPalette(dark), cover: cover, seed: seed });
-          var stageRef = createStage(state);
-          stage = stageRef;
-          var geometry = {
-            width: width,
-            height: height,
-            origin: [clamp01(point.x / Math.max(1, width)), clamp01(point.y / Math.max(1, height))],
-            roughness: roughness,
-            seed: seed,
-            ink: inkPalette(dark),
-            pattern: null,
-          };
-          var ctx = stageRef.canvas.getContext("2d");
-          if (baked && ctx) {
-            try {
-              geometry.pattern = ctx.createPattern(baked.canvas, "repeat");
-            } catch (error) {
-              geometry.pattern = geometry.ink.base;
-            }
-          } else if (ctx) {
-            geometry.pattern = geometry.ink.base;
-          }
-          if (ctx) {
-            var bandDpr = Math.min(1.5, Math.max(1, global.devicePixelRatio || 1));
-            stageRef.canvas.width = Math.max(1, Math.round(width * bandDpr));
-            stageRef.canvas.height = Math.max(1, Math.round(height * bandDpr));
-            ctx.setTransform(stageRef.canvas.width / Math.max(1, width), 0, 0, stageRef.canvas.height / Math.max(1, height), 0, 0);
-          }
+        if (bead) bead.remove();
+        var stageRef = createStage(state);
+        stage = stageRef;
+        var geometry = {
+          width: width,
+          height: height,
+          origin: [clamp01(point.x / Math.max(1, width)), clamp01(point.y / Math.max(1, height))],
+          roughness: roughness,
+          seed: seed,
+        };
 
-          var previous = 0;
-          var elapsed = 0;
-          function frame(timestamp) {
-            if (settled) return;
-            if (previous) elapsed += Math.min(50, timestamp - previous);
-            previous = timestamp;
-            var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
-            var progress = 1 - Math.pow(1 - t, 1.35);
-            var points = holePolygon(progress, geometry);
-            stageRef.frame.style.clipPath = polygonCss(points);
-            if (ctx) paintBand(ctx, points, geometry);
-            if (t >= 1) {
-              // 满屏的同一帧跳转：地址栏换成目标站，页面内容已经是它
-              finish(undefined);
-              commit(href);
-              return;
-            }
-            global.requestAnimationFrame(frame);
+        var previous = 0;
+        var elapsed = 0;
+        function frame(timestamp) {
+          if (settled) return;
+          if (previous) elapsed += Math.min(50, timestamp - previous);
+          previous = timestamp;
+          var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
+          var progress = 1 - Math.pow(1 - t, 1.35);
+          var points = holePolygon(progress, geometry);
+          stageRef.frame.style.clipPath = polygonCss(points);
+          if (t >= 1) {
+            // 满屏的同一帧跳转：地址栏换成目标站，页面内容已经是它
+            finish(undefined);
+            commit(href);
+            return;
           }
           global.requestAnimationFrame(frame);
-        });
+        }
+        global.requestAnimationFrame(frame);
       }
 
       var settleTimer = 0;
@@ -726,7 +535,6 @@
     sameGroup: sameGroup,
     // 自测用
     _internal: {
-      bakeInk: bakeInk,
       holePolygon: holePolygon,
       field: field,
       debugState: function () {

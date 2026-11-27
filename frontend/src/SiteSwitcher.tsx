@@ -442,8 +442,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
       const href = site.href;
       closePanel();
       if (isSameSiteGroup(href)) {
-        // 墨洞直接开在目标站上：封面只用来调墨环的颜色，读不出像素时运行时退回纯墨
-        switchWebsite({ href, point, coverUrl: coverOf(site.thumb) || site.thumb });
+        // 墨洞直接开在目标站上，洞边不画描边
+        switchWebsite({ href, point });
         return;
       }
       openMenuSite(site, mode);
