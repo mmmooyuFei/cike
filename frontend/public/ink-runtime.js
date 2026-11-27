@@ -1,0 +1,643 @@
+/**
+ * 站点切换墨迹过场 —— 运行时 v3（classic script，零依赖，不需要构建）。
+ *
+ * 形态：**旧页不动，墨洞直接开在新站的真实页面上。**
+ *
+ *   点站点 → 落点先起一颗墨珠（几百毫秒的加载反馈）→ 目标站以 iframe 提前加载（悬停时就开始）
+ *          → 目标站画出来后，从鼠标点推开：洞内是目标站的活页面，洞外还是当前页
+ *          → 推开到满屏的同一帧 `location.assign()`，地址栏换成目标站（后退可回原页）
+ *
+ * 为什么不是「两段式墨迹」：那需要先把整屏盖住再等新页启动，用户会被一片静止的墨扣住，
+ * 而且洞里的内容直到跳转后才可能出现。这里旧页始终是活的，洞里的内容也始终是活的。
+ *
+ * 为什么不截当前页的图：跨文档拿不到旧页像素；`foreignObject` 那条路会丢字体、还会多花 300ms。
+ * iframe 把「旧页 + 新页」同时留在同一个文档里，两边都是真实渲染，不需要任何截图。
+ *
+ * 边界：
+ *   - 目标站被 `X-Frame-Options` / CSP 拦掉，或 3s 内没加载完 → 不铺洞，直接普通跳转。
+ *   - 目标站没登录（iframe 里被 IdP 拦住）→ 洞内会是登录页；此时推开后仍然 `location.replace`，
+ *     地址栏与 Cookie 域都正确，用户在新站里照常登录。
+ *   - 没有 `clip-path: polygon()` → 直接普通跳转。
+ *   - `prefers-reduced-motion` → 不播过场，直接普通跳转。
+ *   - 前进后退（bfcache）→ 恢复时把舞台摘掉。
+ *
+ * 对外 API（`window.JiyiInk`）：
+ *   switchTo({ href, point, coverUrl })  → Promise<void>  点站点时调；内部完成加载、推开与跳转
+ *   warm(href)                                            面板打开 / 行悬停时预热（预加载 iframe）
+ *   cancelWarm(href)                                      面板关闭时丢掉预热
+ *   sameGroup(href)                                       目标是否同一站群
+ */
+(function (global, doc) {
+  "use strict";
+
+  /* ============================================================ 常量 */
+
+  /** 覆盖层与 iframe 的层级：压过站内一切浮层。 */
+  var Z_INDEX = 2147483000;
+  /** 推开时长。 */
+  var REVEAL_MS = 640;
+  /** 预热开始后最多等这么久就必须推开（到点没加载完就按普通跳转收场）。 */
+  var READY_TIMEOUT_MS = 3000;
+  /** iframe `load` 之后再给渲染留的时间：load 不等于首帧。 */
+  var PAINT_SETTLE_MS = 140;
+  /** 墨环宽度占短边的比例（夹在下面两个值之间）。 */
+  var BAND_MIN = 28;
+  var BAND_MAX = 96;
+  /** 墨纹烘焙尺寸。 */
+  var INK_W = 384;
+  var INK_H = 240;
+  /** 墨环轮廓的采样条数：越少越方，越多越贵；96 条在 60fps 下没有压力。 */
+  var RAYS = 96;
+
+  /** 浅色底上用暖黑墨，深色底上用米白墨。 */
+  var INK_ON_LIGHT = { base: "#171310", wash: "#3d3226", grain: "#2a231b" };
+  var INK_ON_DARK = { base: "#efe6d4", wash: "#c8b795", grain: "#fffaf0" };
+
+  /* ============================================================ 基础工具 */
+
+  function clamp01(value) {
+    return value < 0 ? 0 : value > 1 ? 1 : value;
+  }
+
+  function reduced() {
+    try {
+      return !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /** 站点组：取主机名最后两段（`a.example.com` 与 `b.example.com` 同组）。 */
+  function siteGroup(hostname) {
+    var parts = String(hostname || "").toLowerCase().split(".");
+    return parts.length <= 2 ? parts.join(".") : parts.slice(-2).join(".");
+  }
+
+  function sameGroup(href) {
+    try {
+      return siteGroup(new URL(href, doc.baseURI).hostname) === siteGroup(global.location.hostname);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function luminance(color) {
+    var match = String(color || "").match(/\d+(\.\d+)?/g);
+    if (!match || match.length < 3) return 1;
+    return (0.2126 * +match[0] + 0.7152 * +match[1] + 0.0722 * +match[2]) / 255;
+  }
+
+  function isDarkPage() {
+    var element = doc.documentElement;
+    if (element.dataset.theme) {
+      return element.dataset.theme === "night" || element.dataset.theme === "dark";
+    }
+    if (element.classList.contains("dark")) return true;
+    if (!doc.body) return false;
+    try {
+      return luminance(global.getComputedStyle(doc.body).backgroundColor) < 0.35;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function inkPalette(dark) {
+    return dark ? INK_ON_DARK : INK_ON_LIGHT;
+  }
+
+  function supportsClipPath() {
+    return typeof global.CSS !== "undefined" && global.CSS.supports && global.CSS.supports("clip-path", "polygon(0 0, 1px 0, 0 1px)");
+  }
+
+  /* ============================================================ 噪声（与着色器同一条公式） */
+
+  function mulberry32(seed) {
+    var state = seed >>> 0;
+    return function random() {
+      state = (state + 0x6d2b79f5) >>> 0;
+      var t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function hash2(x, y) {
+    var value = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function noise2(x, y) {
+    var xi = Math.floor(x);
+    var yi = Math.floor(y);
+    var xf = x - xi;
+    var yf = y - yi;
+    var u = xf * xf * (3 - 2 * xf);
+    var v = yf * yf * (3 - 2 * yf);
+    var a = hash2(xi, yi);
+    var b = hash2(xi + 1, yi);
+    var c = hash2(xi, yi + 1);
+    var d = hash2(xi + 1, yi + 1);
+    return (a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v;
+  }
+
+  /** 5 阶 fbm：矩阵与衰减照搬着色器里的 `field()`。 */
+  function field(x, y) {
+    var total = 0;
+    var amplitude = 0.55;
+    for (var i = 0; i < 5; i += 1) {
+      total += amplitude * noise2(x, y);
+      var nx = 1.6 * x - 1.2 * y + 3.7;
+      var ny = 1.2 * x + 1.6 * y + 3.7;
+      x = nx;
+      y = ny;
+      amplitude *= 0.47;
+    }
+    return total;
+  }
+
+  /* ============================================================ 墨纹烘焙 */
+
+  /**
+   * 烘一张墨纹：底色渐变 + 封面暗纹（可选）+ 颗粒 + 暗角。
+   * 封面必须是像素可读的图源；读不出来（跨源无 CORS）就退回纯程序化墨纹。
+   */
+  function bakeInk(options) {
+    var settings = options || {};
+    var ink = settings.ink || INK_ON_LIGHT;
+    var cover = settings.cover || null;
+    var seed = settings.seed || 1;
+    var canvas = doc.createElement("canvas");
+    canvas.width = INK_W;
+    canvas.height = INK_H;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    var gradient = ctx.createLinearGradient(0, 0, INK_W * 0.35, INK_H);
+    gradient.addColorStop(0, ink.base);
+    gradient.addColorStop(1, ink.wash);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, INK_W, INK_H);
+
+    var coverWidth = cover ? cover.naturalWidth || cover.width || 0 : 0;
+    var coverHeight = cover ? cover.naturalHeight || cover.height || 0 : 0;
+    if (cover && coverWidth && coverHeight) {
+      try {
+        var ratio = Math.max(INK_W / coverWidth, INK_H / coverHeight);
+        var width = coverWidth * ratio;
+        var height = coverHeight * ratio;
+        try {
+          ctx.filter = "blur(4px)";
+        } catch (error) {
+          /* 老浏览器没有 canvas filter */
+        }
+        ctx.drawImage(cover, (INK_W - width) / 2, (INK_H - height) / 2, width, height);
+        ctx.filter = "none";
+        ctx.globalCompositeOperation = "color";
+        ctx.fillStyle = ink.base;
+        ctx.fillRect(0, 0, INK_W, INK_H);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, INK_W, INK_H);
+        ctx.globalAlpha = 0.26;
+        ctx.fillStyle = ink.base;
+        ctx.fillRect(0, 0, INK_W, INK_H);
+        ctx.globalAlpha = 1;
+      } catch (error) {
+        return bakeInk({ ink: ink, seed: seed });
+      }
+    }
+
+    var random = mulberry32(Math.floor(seed * 9973) || 1);
+    for (var i = 0; i < 260; i += 1) {
+      ctx.globalAlpha = 0.05 + random() * 0.12;
+      ctx.fillStyle = random() > 0.5 ? ink.grain : ink.wash;
+      ctx.beginPath();
+      ctx.arc(random() * INK_W, random() * INK_H, 0.5 + random() * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 0.2;
+    var vignette = ctx.createRadialGradient(
+      INK_W * 0.5,
+      INK_H * 0.5,
+      Math.min(INK_W, INK_H) * 0.3,
+      INK_W * 0.5,
+      INK_H * 0.5,
+      Math.max(INK_W, INK_H) * 0.72,
+    );
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,1)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, INK_W, INK_H);
+    ctx.globalAlpha = 1;
+
+    return { canvas: canvas };
+  }
+
+  /** 封面探测按 URL 缓存：同一次会话每个地址只试一次。 */
+  var coverCache = {};
+  var coverFailed = {};
+
+  function fetchCover(url) {
+    try {
+      return global
+        .fetch(url, { mode: "cors", credentials: "omit" })
+        .then(function (response) {
+          if (!response.ok) throw new Error("cover " + response.status);
+          return response.blob();
+        })
+        .then(function (blob) {
+          return global.createImageBitmap(blob);
+        })
+        .catch(function () {
+          coverFailed[url] = true;
+          return null;
+        });
+    } catch (error) {
+      coverFailed[url] = true;
+      return Promise.resolve(null);
+    }
+  }
+
+  function loadCover(url) {
+    if (!url || typeof global.fetch !== "function" || typeof global.createImageBitmap !== "function") {
+      return Promise.resolve(null);
+    }
+    if (coverFailed[url]) return Promise.resolve(null);
+    if (!coverCache[url]) coverCache[url] = fetchCover(url);
+    var pending = coverCache[url];
+    return Promise.race([
+      pending,
+      new Promise(function (resolve) {
+        global.setTimeout(function () {
+          resolve(null);
+        }, 320);
+      }),
+    ]);
+  }
+
+  /* ============================================================ 预热：把目标站先拉起来 */
+
+  /** 预热好的 iframe（按 href 缓存，面板关掉时才丢）。 */
+  var warmFrames = {};
+
+  function createTargetFrame(href) {
+    var frame = doc.createElement("iframe");
+    frame.setAttribute("aria-hidden", "true");
+    frame.tabIndex = -1;
+    frame.title = "";
+    frame.dataset.jiyiInkTarget = "1";
+    // 必须按最终尺寸布局：目标站的响应式断点、vh 单位都按这个尺寸算，
+    // 尺寸给错的话推开那一刻布局会跳一下。
+    frame.style.cssText =
+      "position:fixed;left:0;top:0;width:100vw;height:100vh;border:0;z-index:" +
+      (Z_INDEX + 1) +
+      ";display:none;background:transparent;opacity:0;pointer-events:none";
+    frame.src = href;
+    var state = { frame: frame, loaded: false, failed: false };
+    frame.addEventListener("load", function () {
+      if (frame.dataset.jiyiInkDropped === "1") return;
+      state.loaded = true;
+    });
+    frame.addEventListener("error", function () {
+      state.failed = true;
+    });
+    doc.body.appendChild(frame);
+    return state;
+  }
+
+  /** 预热某个目标站（幂等）。面板打开或行悬停时调。 */
+  function warm(href) {
+    if (!href || !sameGroup(href) || warmFrames[href]) return;
+    warmFrames[href] = createTargetFrame(href);
+  }
+
+  function cancelWarm(href) {
+    var state = warmFrames[href];
+    if (!state) return;
+    state.frame.dataset.jiyiInkDropped = "1";
+    state.frame.remove();
+    delete warmFrames[href];
+  }
+
+  function dropAllWarm() {
+    Object.keys(warmFrames).forEach(cancelWarm);
+  }
+
+  /* ============================================================ 舞台 */
+
+  var stage = null;
+
+  function createStage(state) {
+    var frame = state.frame;
+    var canvas = doc.createElement("canvas");
+    canvas.setAttribute("aria-hidden", "true");
+    canvas.dataset.jiyiInkStage = "1";
+    canvas.style.cssText =
+      "position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:" +
+      (Z_INDEX + 2) +
+      ";pointer-events:none;display:block";
+    // 拦截旧页的一切交互：推开过程中旧页不该被点到
+    var shield = doc.createElement("div");
+    shield.dataset.jiyiInkStage = "1";
+    shield.style.cssText =
+      "position:fixed;inset:0;z-index:" + (Z_INDEX + 1) + ";pointer-events:auto;touch-action:none;background:transparent";
+    frame.style.display = "block";
+    frame.style.opacity = "1";
+    frame.style.pointerEvents = "none";
+    // 起始状态：洞还没开
+    frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
+    doc.body.appendChild(shield);
+    doc.body.appendChild(canvas);
+    return { frame: frame, canvas: canvas, shield: shield };
+  }
+
+  /**
+   * 墨洞轮廓：与着色器同一条膨胀曲线 + 同一支 fbm。
+   * 返回 `[{x,y}...]`，单位是视口像素。
+   */
+  function holePolygon(progress, geometry) {
+    var width = geometry.width;
+    var height = geometry.height;
+    var aspect = width / Math.max(1, height);
+    var origin = geometry.origin;
+    var originX = origin[0] * width;
+    var originY = origin[1] * height;
+    var farX = Math.max(origin[0], 1 - origin[0]) * aspect;
+    var farY = Math.max(origin[1], 1 - origin[1]);
+    var reach = Math.sqrt(farX * farX + farY * farY);
+    var growth = -0.12 + (reach + 0.22 + 0.12) * progress;
+    var amplitude = (0.1 + geometry.roughness * 0.27) * Math.sin(progress * Math.PI);
+    var points = [];
+    for (var i = 0; i < RAYS; i += 1) {
+      var angle = (i / RAYS) * Math.PI * 2;
+      var cos = Math.cos(angle);
+      var sin = Math.sin(angle);
+      // 在「短边为 1」的坐标里取样，与着色器的 uv 空间一致
+      var sampleX = origin[0] + (cos * growth) / aspect;
+      var sampleY = origin[1] + sin * growth;
+      var value = field(sampleX * 7.8 + geometry.seed, sampleY * 10.6 + geometry.seed * 0.71);
+      var radius = growth + (value - 0.5) * amplitude;
+      points.push([originX + cos * radius * height, originY + sin * radius * height]);
+    }
+    return points;
+  }
+
+  function polygonCss(points) {
+    var parts = [];
+    for (var i = 0; i < points.length; i += 1) {
+      parts.push(Math.round(points[i][0]) + "px " + Math.round(points[i][1]) + "px");
+    }
+    return "polygon(" + parts.join(",") + ")";
+  }
+
+  /** 墨环：沿洞边画一圈湿墨，把 iframe 的硬裁切边盖掉。 */
+  function paintBand(ctx, points, geometry) {
+    var width = geometry.width;
+    var height = geometry.height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.beginPath();
+    for (var i = 0; i < points.length; i += 1) {
+      if (i === 0) ctx.moveTo(points[i][0], points[i][1]);
+      else ctx.lineTo(points[i][0], points[i][1]);
+    }
+    ctx.closePath();
+    var band = Math.max(BAND_MIN, Math.min(BAND_MAX, Math.min(width, height) * 0.055));
+    try {
+      ctx.filter = "blur(7px)";
+    } catch (error) {
+      /* 没有 filter 就画硬边，形态仍在 */
+    }
+    ctx.lineJoin = "round";
+    ctx.lineWidth = band;
+    ctx.strokeStyle = geometry.pattern;
+    ctx.globalAlpha = 0.92;
+    ctx.stroke();
+    // 内侧再压一道更深的墨，边界更“湿”
+    ctx.lineWidth = band * 0.45;
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = geometry.ink.base;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+
+  /**
+   * 落点的墨珠：点击那一刻先给一个反馈。
+   *
+   * 目标站还没在 iframe 里画出来时（没预热到、或者网络慢），什么都不显示会像"点了没反应"。
+   * 这颗珠子只表示"墨已经从这儿出来了"，等舞台铺开就摘掉。
+   */
+  function createBead(point, ink) {
+    var size = 34;
+    var bead = doc.createElement("div");
+    bead.dataset.jiyiInkStage = "1";
+    bead.setAttribute("aria-hidden", "true");
+    bead.style.cssText =
+      "position:fixed;left:" +
+      Math.round(point.x - size / 2) +
+      "px;top:" +
+      Math.round(point.y - size / 2) +
+      "px;width:" +
+      size +
+      "px;height:" +
+      size +
+      "px;border-radius:50%;z-index:" +
+      Z_INDEX +
+      ";pointer-events:none;opacity:0;transform:scale(.45);" +
+      "background:radial-gradient(circle at 48% 42%," +
+      ink.grain +
+      " 0%," +
+      ink.base +
+      " 38%," +
+      ink.wash +
+      " 72%,rgba(0,0,0,0) 74%);" +
+      "transition:opacity 110ms linear,transform 460ms cubic-bezier(.2,.72,.28,1)";
+    doc.body.appendChild(bead);
+    global.requestAnimationFrame(function () {
+      bead.style.opacity = "0.95";
+      bead.style.transform = "scale(1.7)";
+    });
+    return bead;
+  }
+
+  function commit(href) {
+    // 必须用 assign 而不是 replace：replace 会把当前页从历史里顶掉，浏览器的「后退」就废了。
+    // 也不能先摘 iframe 再跳 —— 那样会有一帧退回旧页；iframe 交给浏览器随文档一起回收。
+    global.location.assign(href);
+  }
+
+  /**
+   * 点站点：推开墨洞 → 满屏的同一帧跳转。
+   *
+   * @param {object} options
+   * @param {string} options.href              目标地址
+   * @param {{x:number,y:number}} options.point 鼠标点（视口 px）
+   * @param {string} [options.coverUrl]        目标站封面（读得出像素就烘进墨环）
+   * @param {number} [options.roughness]       墨边粗糙度 0..1
+   * @param {number} [options.duration]        推开时长
+   * @returns {Promise<{skipped?: string}>}
+   */
+  function switchTo(options) {
+    var settings = options || {};
+    var href = String(settings.href || "");
+    if (!href) return Promise.resolve({ skipped: "no-href" });
+    // 站群外、减少动效、没有 clip-path：一律普通跳转
+    if (!sameGroup(href) || reduced() || !supportsClipPath()) {
+      commit(href);
+      return Promise.resolve({ skipped: "plain" });
+    }
+    if (stage) return Promise.resolve({ skipped: "busy" });
+
+    var dark = settings.dark != null ? !!settings.dark : isDarkPage();
+    var width = global.innerWidth;
+    var height = global.innerHeight;
+    var point = settings.point || { x: width / 2, y: height / 2 };
+    var seed = settings.seed != null ? settings.seed : Math.round(Math.random() * 1e6) / 1e6 + 0.37;
+    var roughness = settings.roughness != null ? clamp01(settings.roughness) : 0.6;
+    var duration = settings.duration != null ? settings.duration : REVEAL_MS;
+
+    // 目标站 iframe：优先用预热的，没有就现拉
+    var state = warmFrames[href];
+    if (!state) {
+      state = createTargetFrame(href);
+      warmFrames[href] = state;
+    }
+
+    var bead = createBead(point, inkPalette(dark));
+
+    return new Promise(function (resolve) {
+      var settled = false;
+      var readyTimer = 0;
+      var pollTimer = 0;
+
+      function finish(skipped) {
+        if (settled) return;
+        settled = true;
+        if (readyTimer) global.clearTimeout(readyTimer);
+        if (pollTimer) global.clearInterval(pollTimer);
+        resolve({ skipped: skipped });
+      }
+
+      function start() {
+        if (settled) return;
+        loadCover(settings.coverUrl).then(function (cover) {
+          if (settled) return;
+          var baked = bakeInk({ ink: inkPalette(dark), cover: cover, seed: seed });
+          var stageRef = createStage(state);
+          stage = stageRef;
+          var geometry = {
+            width: width,
+            height: height,
+            origin: [clamp01(point.x / Math.max(1, width)), clamp01(point.y / Math.max(1, height))],
+            roughness: roughness,
+            seed: seed,
+            ink: inkPalette(dark),
+            pattern: null,
+          };
+          var ctx = stageRef.canvas.getContext("2d");
+          if (baked && ctx) {
+            try {
+              geometry.pattern = ctx.createPattern(baked.canvas, "repeat");
+            } catch (error) {
+              geometry.pattern = geometry.ink.base;
+            }
+          } else if (ctx) {
+            geometry.pattern = geometry.ink.base;
+          }
+          if (ctx) {
+            stageRef.canvas.width = Math.max(1, Math.round(width * Math.min(2, global.devicePixelRatio || 1)));
+            stageRef.canvas.height = Math.max(1, Math.round(height * Math.min(2, global.devicePixelRatio || 1)));
+            ctx.setTransform(stageRef.canvas.width / Math.max(1, width), 0, 0, stageRef.canvas.height / Math.max(1, height), 0, 0);
+          }
+
+          var previous = 0;
+          var elapsed = 0;
+          function frame(timestamp) {
+            if (settled) return;
+            if (previous) elapsed += Math.min(50, timestamp - previous);
+            previous = timestamp;
+            var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
+            var progress = 1 - Math.pow(1 - t, 1.7);
+            var points = holePolygon(progress, geometry);
+            stageRef.frame.style.clipPath = polygonCss(points);
+            if (ctx) paintBand(ctx, points, geometry);
+            if (t >= 1) {
+              // 满屏的同一帧跳转：地址栏换成目标站，页面内容已经是它
+              finish(undefined);
+              commit(href);
+              return;
+            }
+            global.requestAnimationFrame(frame);
+          }
+          global.requestAnimationFrame(frame);
+        });
+      }
+
+      function waitForPaint() {
+        if (settled) return;
+        // load 之后仍要给目标站一点渲染时间；SSO 会话在 iframe 里通常已经热了
+        global.setTimeout(start, PAINT_SETTLE_MS);
+      }
+
+      if (state.loaded) {
+        waitForPaint();
+      } else {
+        readyTimer = global.setTimeout(function () {
+          if (settled) return;
+          // 超时：不铺洞，普通跳转（总比点了没反应好）
+          if (bead) bead.remove();
+          finish("timeout");
+          commit(href);
+        }, READY_TIMEOUT_MS);
+        pollTimer = global.setInterval(function () {
+          if (settled) return;
+          if (state.failed) {
+            finish("failed");
+            if (bead) bead.remove();
+            commit(href);
+            return;
+          }
+          if (state.loaded) {
+            global.clearInterval(pollTimer);
+            pollTimer = 0;
+            if (readyTimer) {
+              global.clearTimeout(readyTimer);
+              readyTimer = 0;
+            }
+            waitForPaint();
+          }
+        }, 40);
+      }
+
+    });
+  }
+
+  /* ============================================================ 守卫 */
+
+  global.addEventListener("pageshow", function (event) {
+    if (!event.persisted) return;
+    var nodes = doc.querySelectorAll("[data-jiyi-ink-stage],[data-jiyi-ink-target]");
+    for (var i = 0; i < nodes.length; i += 1) nodes[i].remove();
+    stage = null;
+    warmFrames = {};
+  });
+
+  /* ============================================================ 导出 */
+
+  global.JiyiInk = {
+    version: 3,
+    switchTo: switchTo,
+    warm: warm,
+    cancelWarm: cancelWarm,
+    dropWarm: dropAllWarm,
+    reduced: reduced,
+    isDarkPage: isDarkPage,
+    inkPalette: inkPalette,
+    sameGroup: sameGroup,
+    // 自测用
+    _internal: { bakeInk: bakeInk, holePolygon: holePolygon, field: field },
+  };
+})(window, document);

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { cancelPreload, isSameSiteGroup, preloadTarget, switchWebsite } from "./inkTransition";
 import { NAV_MENU_FALLBACK, fetchNavMenu, openMenuSite, type MenuSite, type NavMenu } from "./menu";
 import {
   ANCHOR_OFFSET,
@@ -94,6 +95,15 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
   const motion = useRef<Motion | null>(null);
   const activeRef = useRef(0);
   const openRef = useRef(false);
+
+  /**
+   * 逻辑上的开合意图：连点时立刻翻转，不等弹簧落位。
+   *
+   * 只看 `open`（渲染态）的话，收起动画里每一次点击都会再走一遍「关闭」——
+   * 表现就是「连点只有一次响应」。意图在这里是唯一判据。
+   */
+  const intentRef = useRef(false);
+
   const reducedRef = useRef(false);
 
   activeRef.current = active;
@@ -253,7 +263,39 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     m.iconX.target = 1;
   }, [sites.length]);
 
+  /** 从「正在收起」转回展开：把弹簧参数调回展开那一档（收起用的是更硬的一组）。 */
+  const applyOpenTempo = useCallback((m: Motion) => {
+    m.navWidth.stiffness = OPEN_NAV.stiffness;
+    m.navWidth.damping = OPEN_NAV.damping;
+    m.navHeight.stiffness = OPEN_NAV.stiffness;
+    m.navHeight.damping = OPEN_NAV.damping;
+    m.progress.stiffness = OPEN_NAV.stiffness;
+    m.progress.damping = OPEN_NAV.damping;
+    m.iconX.stiffness = OPEN_NAV.stiffness;
+    m.iconX.damping = OPEN_NAV.damping;
+    m.body.stiffness = OPEN_BODY.stiffness;
+    m.body.damping = OPEN_BODY.damping;
+    for (const card of m.cards) {
+      card.stiffness = OPEN_CARD.stiffness;
+      card.damping = OPEN_CARD.damping;
+    }
+  }, []);
+
   const openPanel = useCallback(() => {
+    // 正在收起、且还没卸载时又点开：不重建弹簧，把目标改回展开值，视觉上接着走。
+    // 必须带 `mounted`：收起已经落位（portal 已卸载）时 motion 里的 phase 仍是 closing，
+    // 只按 phase 判断会走进「接着展开」这条路，面板却永远不再挂回来。
+    const active = motion.current;
+    if (active && active.phase === "closing" && mounted) {
+      intentRef.current = true;
+      active.phase = "open";
+      applyOpenTempo(active);
+      applyTargets();
+      setOpen(true);
+      run();
+      return;
+    }
+    intentRef.current = true;
     const trigger = triggerRef.current;
     if (!trigger) return;
     reducedRef.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -283,9 +325,10 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     activeRef.current = initialActive;
     setMounted(true);
     setOpen(true);
-  }, [sites]);
+  }, [applyOpenTempo, applyTargets, run, sites]);
 
   const closePanel = useCallback(() => {
+    intentRef.current = false;
     const m = motion.current;
     const trigger = triggerRef.current;
     if (!m || !trigger) {
@@ -375,9 +418,34 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     [run],
   );
 
+  /**
+   * 点站点：站群内一律**当前标签**跳转并播墨迹过场（从鼠标点涨墨 → 新站接手退墨）。
+   *
+   * - 过场只在同一个标签里成立，所以站群内不再看 `openMode`；跨站群的地址仍按设置打开。
+   * - 当前站那一行不跳：点了等于原地刷新，还要白跑一次过场。
+   * - 键盘激活（Enter / 空格）拿不到 clientX/Y，此时用该行中心当圆心。
+   */
+  /** 当前预热的那个目标：换行/关面板时要丢掉上一个 */
+  const preloadRef = useRef<string | null>(null);
+
   const pick = useCallback(
-    (site: MenuSite) => {
+    (site: MenuSite, event: MouseEvent<HTMLButtonElement>) => {
+      if (isCurrent(site)) {
+        closePanel();
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const point =
+        event.clientX || event.clientY
+          ? { x: event.clientX, y: event.clientY }
+          : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      const href = site.href;
       closePanel();
+      if (isSameSiteGroup(href)) {
+        // 墨洞直接开在目标站上：封面只用来调墨环的颜色，读不出像素时运行时退回纯墨
+        switchWebsite({ href, point, coverUrl: coverOf(site.thumb) || site.thumb });
+        return;
+      }
       openMenuSite(site, mode);
     },
     [closePanel, mode],
@@ -393,9 +461,15 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
         data-site-row
         className={`site-row${index === active ? " is-active" : ""}`}
         aria-current={current ? "true" : undefined}
-        onPointerEnter={() => highlight(index)}
+        onPointerEnter={() => {
+          highlight(index);
+          // 只留一个预热：换到别的行就把上一个丢掉，别让三个站的后台页都挂着
+          if (preloadRef.current && preloadRef.current !== site.href) cancelPreload(preloadRef.current);
+          preloadRef.current = site.href;
+          preloadTarget(site.href);
+        }}
         onFocus={() => highlight(index)}
-        onClick={() => pick(site)}
+        onClick={(event) => pick(site, event)}
       >
         <span className="site-names">
           <b>{site.title}</b>
@@ -452,7 +526,7 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
           aria-label="切换站点"
           aria-expanded={open}
           title="切换站点"
-          onClick={() => (openRef.current ? closePanel() : openPanel())}
+          onClick={() => (intentRef.current ? closePanel() : openPanel())}
         >
           <span ref={iconRef}>{ICON_SWAP}</span>
         </button>
