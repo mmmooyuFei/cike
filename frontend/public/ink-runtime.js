@@ -210,10 +210,6 @@
 
   var stage = null;
 
-  /** 1×1 透明 GIF：蒙版的初始值（洞没开时 iframe 完全不可见）。 */
-  var TRANSPARENT_PIXEL =
-    'url("data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==")';
-
   /**
    * 舞台：一个铺满视口的 iframe + 一层挡交互的透明遮罩。
    *
@@ -236,19 +232,22 @@
     var soft = supportsMask();
     var mask = null;
     if (soft) {
-      mask = createMask(state.width || global.innerWidth, state.height || global.innerHeight);
-      // 起始是一张全透明的小图：洞还没开
-      frame.style.maskImage = TRANSPARENT_PIXEL;
-      frame.style.webkitMaskImage = TRANSPARENT_PIXEL;
+      mask = createMaskSvg(state.width || global.innerWidth, state.height || global.innerHeight);
+      // 引用内联 SVG 蒙版：不加载资源，CSP 拦不到
+      var ref = "url(#" + MASK_ID + ")";
+      frame.style.maskImage = ref;
+      frame.style.webkitMaskImage = ref;
       frame.style.maskSize = "100% 100%";
       frame.style.webkitMaskSize = "100% 100%";
       frame.style.maskRepeat = "no-repeat";
       frame.style.webkitMaskRepeat = "no-repeat";
       frame.style.maskPosition = "0 0";
       frame.style.webkitMaskPosition = "0 0";
-    } else {
-      frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
+      frame.style.maskMode = "alpha";
+      frame.style.webkitMaskMode = "alpha";
     }
+    // 硬边兜底：无论蒙版是否可用，都先把洞裁出来（蒙版只是把这条边羽化掉）
+    frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
     doc.body.appendChild(shield);
     return { frame: frame, shield: shield, soft: soft, mask: mask };
   }
@@ -310,45 +309,90 @@
     return points;
   }
 
-  /**
-   * 软边蒙版：在本机小画布上把洞画成"白填充 + 高斯模糊"，再把这张图的 alpha 当 mask。
-   *
-   * 蒙版只有视口的 1/4 那么大（`MASK_SCALE`），模糊与编码都便宜；`mask-size: 100% 100%`
-   * 放大时浏览器的双线性插值正好把边再磨平一层。**只有透明度，不带任何颜色**。
-   */
-  var MASK_SCALE = 4;
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var MASK_ID = "jiyi-ink-mask";
+  var MASK_PATH_ID = "jiyi-ink-mask-path";
+  var MASK_BLUR_ID = "jiyi-ink-mask-blur";
 
-  function createMask(width, height) {
-    var canvas = doc.createElement("canvas");
-    canvas.width = Math.max(8, Math.round(width / MASK_SCALE));
-    canvas.height = Math.max(8, Math.round(height / MASK_SCALE));
-    return { canvas: canvas, ctx: canvas.getContext("2d"), width: width, height: height };
+  /**
+   * 羽化半径（CSS px）：蒙版用它做模糊，硬边兜底用它外扩。
+   *
+   * **硬边兜底是必需的**：蒙版要是没生效（浏览器不支持 `mask-image: url(#id)`、
+   * 或者站点 CSP / 扩展把它拦了），只留 mask 的话 iframe 整块不可见，
+   * 用户看到的就是"点一下、黑点闪一下、页面直接跳走"。外扩一点点再裁一刀，
+   * 至少洞还会长出来。
+   */
+  function featherPx(width, height) {
+    return Math.max(4, Math.min(14, Math.min(width, height) * 0.011));
   }
 
-  function maskUrl(mask, points) {
-    var ctx = mask.ctx;
-    if (!ctx) return "";
-    var sx = mask.canvas.width / mask.width;
-    var sy = mask.canvas.height / mask.height;
-    ctx.clearRect(0, 0, mask.canvas.width, mask.canvas.height);
-    ctx.save();
-    // 羽化半径按视口算（视口的 0.9%，夹在 6–14px），再折算到蒙版尺度
-    var feather = Math.max(6, Math.min(14, Math.min(mask.width, mask.height) * 0.009));
-    try {
-      ctx.filter = "blur(" + Math.max(1, feather * sx).toFixed(2) + "px)";
-    } catch (error) {
-      /* 没有 canvas filter：退成硬边，形状仍在 */
-    }
-    ctx.fillStyle = "#fff";
-    ctx.beginPath();
+  /**
+   * 软边蒙版：一段内联 SVG —— 白色路径 `d` 每帧更新，外面套一个高斯模糊。
+   *
+   * 为什么不用 `mask-image: url("data:image/png;…")`：`data:` 属于图片资源，
+   * 站点的 CSP 里 `img-src` 不放开就会把蒙版整张拦掉 —— 表现是洞完全不可见、
+   * 只剩"点一下就跳走"，而且不报错。内联 SVG 引用（`url(#id)`）不加载任何资源，
+   * CSP 拦不到，也省掉每帧一次 PNG 编码。
+   */
+  function createMaskSvg(width, height) {
+    var holder = doc.createElementNS(SVG_NS, "svg");
+    holder.dataset.jiyiInkStage = "1";
+    holder.setAttribute("aria-hidden", "true");
+    holder.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;overflow:hidden;pointer-events:none";
+    var mask = doc.createElementNS(SVG_NS, "mask");
+    mask.setAttribute("id", MASK_ID);
+    mask.setAttribute("maskUnits", "userSpaceOnUse");
+    mask.setAttribute("x", "0");
+    mask.setAttribute("y", "0");
+    mask.setAttribute("width", String(width));
+    mask.setAttribute("height", String(height));
+    var filter = doc.createElementNS(SVG_NS, "filter");
+    filter.setAttribute("id", MASK_BLUR_ID);
+    filter.setAttribute("x", "-15%");
+    filter.setAttribute("y", "-15%");
+    filter.setAttribute("width", "130%");
+    filter.setAttribute("height", "130%");
+    var blur = doc.createElementNS(SVG_NS, "feGaussianBlur");
+    // 羽化半径按视口短边算（0.55%，夹 2–7px），这是标准差，视觉过渡带约两倍
+    var sigma = featherPx(width, height) * 0.5;
+    blur.setAttribute("stdDeviation", sigma.toFixed(2));
+    filter.appendChild(blur);
+    var path = doc.createElementNS(SVG_NS, "path");
+    path.setAttribute("id", MASK_PATH_ID);
+    path.setAttribute("fill", "#fff");
+    path.setAttribute("d", "");
+    path.setAttribute("filter", "url(#" + MASK_BLUR_ID + ")");
+    mask.appendChild(filter);
+    mask.appendChild(path);
+    holder.appendChild(mask);
+    doc.body.appendChild(holder);
+    return { holder: holder, path: path };
+  }
+
+  /** 把洞的轮廓沿半径方向外扩 `pad` 像素（给硬边兜底留出羽化宽度）。 */
+  function expandPoints(points, pad, geometry) {
+    if (!pad || !geometry) return points;
+    var originX = geometry.origin[0] * geometry.width;
+    var originY = geometry.origin[1] * geometry.height;
+    var out = new Array(points.length);
     for (var i = 0; i < points.length; i += 1) {
-      if (i === 0) ctx.moveTo(points[i][0] * sx, points[i][1] * sy);
-      else ctx.lineTo(points[i][0] * sx, points[i][1] * sy);
+      var dx = points[i][0] - originX;
+      var dy = points[i][1] - originY;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 0.001) {
+        out[i] = points[i];
+        continue;
+      }
+      out[i] = [points[i][0] + (dx / len) * pad, points[i][1] + (dy / len) * pad];
     }
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-    return 'url("' + mask.canvas.toDataURL("image/png") + '")';
+    return out;
+  }
+
+  function maskPathData(points) {
+    if (!points.length) return "";
+    var d = "M" + points[0][0].toFixed(1) + " " + points[0][1].toFixed(1);
+    for (var i = 1; i < points.length; i += 1) d += "L" + points[i][0].toFixed(1) + " " + points[i][1].toFixed(1);
+    return d + "Z";
   }
 
   function polygonCss(points) {
@@ -486,14 +530,11 @@
           var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
           var progress = 1 - Math.pow(1 - t, 1.35);
           var points = holePolygon(progress, geometry);
+          // 外扩一点点再裁：蒙版生效时这条边被羽化吃掉，蒙版失效时它就是洞口
+          var pad = stageRef.soft ? featherPx(width, height) : 0;
+          stageRef.frame.style.clipPath = polygonCss(expandPoints(points, pad, geometry));
           if (stageRef.soft && stageRef.mask) {
-            var url = maskUrl(stageRef.mask, points);
-            if (url) {
-              stageRef.frame.style.maskImage = url;
-              stageRef.frame.style.webkitMaskImage = url;
-            }
-          } else {
-            stageRef.frame.style.clipPath = polygonCss(points);
+            stageRef.mask.path.setAttribute("d", maskPathData(points));
           }
           if (t >= 1) {
             // 满屏的同一帧跳转：地址栏换成目标站，页面内容已经是它
