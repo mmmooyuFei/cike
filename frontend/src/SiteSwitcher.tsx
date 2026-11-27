@@ -280,6 +280,34 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     }
   }, []);
 
+  /**
+   * 前进/后退回到本页时把面板状态清干净。
+   *
+   * 点击站点是 `location.assign`，离开时面板往往还停在"正在收起"，浏览器把这份内存状态
+   * 一起冻住了（含弹簧里那个 `requestAnimationFrame` id）。回来之后：
+   * - `open` / `mounted` 还是 true → `openPanel()` 直接提前返回；
+   * - 就算走"继续展开"这条路，`run()` 看到 `m.raf` 非 0 也不会重新起循环。
+   * 两者叠在一起就是"点按钮没反应"。所以恢复时把状态归零，下一次点击从头建面板。
+   */
+  useEffect(() => {
+    const reset = () => {
+      stopLoop();
+      motion.current = null;
+      intentRef.current = false;
+      setMounted(false);
+      setOpen(false);
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) reset();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("pagehide", reset);
+    return () => {
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("pagehide", reset);
+    };
+  }, [stopLoop]);
+
   const openPanel = useCallback(() => {
     // 正在收起、且还没卸载时又点开：不重建弹簧，把目标改回展开值，视觉上接着走。
     // 必须带 `mounted`：收起已经落位（portal 已卸载）时 motion 里的 phase 仍是 closing，
