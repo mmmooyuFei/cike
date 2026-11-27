@@ -108,6 +108,16 @@
     return dark ? INK_ON_DARK : INK_ON_LIGHT;
   }
 
+  /** 支持 CSS mask（软边的前提）时用蒙版，否则退回硬边裁切。 */
+  function supportsMask() {
+    return !!(
+      global.CSS &&
+      global.CSS.supports &&
+      (global.CSS.supports("mask-image", "linear-gradient(#fff,#fff)") ||
+        global.CSS.supports("-webkit-mask-image", "linear-gradient(#fff,#fff)"))
+    );
+  }
+
   function supportsClipPath() {
     return typeof global.CSS !== "undefined" && global.CSS.supports && global.CSS.supports("clip-path", "polygon(0 0, 1px 0, 0 1px)");
   }
@@ -200,11 +210,16 @@
 
   var stage = null;
 
+  /** 1×1 透明 GIF：蒙版的初始值（洞没开时 iframe 完全不可见）。 */
+  var TRANSPARENT_PIXEL =
+    'url("data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==")';
+
   /**
    * 舞台：一个铺满视口的 iframe + 一层挡交互的透明遮罩。
    *
-   * **不画墨边**：洞的边界就是两个页面的交界，没有任何描边、阴影或色带。
-   * 形状由 `holePolygon()` 决定，逐帧写进 iframe 的 `clip-path`。
+   * **洞边只有淡羽化，没有任何描边/色带**：支持 CSS mask 时，用一张小画布逐帧画
+   * 「白色多边形 + 高斯模糊」，把它的 alpha 当蒙版（纯透明度，不带颜色）；
+   * 不支持 mask 时退回硬边 `clip-path`。
    */
   function createStage(state) {
     var frame = state.frame;
@@ -218,10 +233,24 @@
     frame.style.display = "block";
     frame.style.opacity = "1";
     frame.style.pointerEvents = "none";
-    // 起始状态：洞还没开
-    frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
+    var soft = supportsMask();
+    var mask = null;
+    if (soft) {
+      mask = createMask(state.width || global.innerWidth, state.height || global.innerHeight);
+      // 起始是一张全透明的小图：洞还没开
+      frame.style.maskImage = TRANSPARENT_PIXEL;
+      frame.style.webkitMaskImage = TRANSPARENT_PIXEL;
+      frame.style.maskSize = "100% 100%";
+      frame.style.webkitMaskSize = "100% 100%";
+      frame.style.maskRepeat = "no-repeat";
+      frame.style.webkitMaskRepeat = "no-repeat";
+      frame.style.maskPosition = "0 0";
+      frame.style.webkitMaskPosition = "0 0";
+    } else {
+      frame.style.clipPath = "polygon(0 0, 0 0, 0 0)";
+    }
     doc.body.appendChild(shield);
-    return { frame: frame, shield: shield };
+    return { frame: frame, shield: shield, soft: soft, mask: mask };
   }
 
   /**
@@ -279,6 +308,47 @@
       points.push([originX + Math.cos(theta) * radius * height, originY + Math.sin(theta) * radius * height]);
     }
     return points;
+  }
+
+  /**
+   * 软边蒙版：在本机小画布上把洞画成"白填充 + 高斯模糊"，再把这张图的 alpha 当 mask。
+   *
+   * 蒙版只有视口的 1/4 那么大（`MASK_SCALE`），模糊与编码都便宜；`mask-size: 100% 100%`
+   * 放大时浏览器的双线性插值正好把边再磨平一层。**只有透明度，不带任何颜色**。
+   */
+  var MASK_SCALE = 4;
+
+  function createMask(width, height) {
+    var canvas = doc.createElement("canvas");
+    canvas.width = Math.max(8, Math.round(width / MASK_SCALE));
+    canvas.height = Math.max(8, Math.round(height / MASK_SCALE));
+    return { canvas: canvas, ctx: canvas.getContext("2d"), width: width, height: height };
+  }
+
+  function maskUrl(mask, points) {
+    var ctx = mask.ctx;
+    if (!ctx) return "";
+    var sx = mask.canvas.width / mask.width;
+    var sy = mask.canvas.height / mask.height;
+    ctx.clearRect(0, 0, mask.canvas.width, mask.canvas.height);
+    ctx.save();
+    // 羽化半径按视口算（视口的 0.9%，夹在 6–14px），再折算到蒙版尺度
+    var feather = Math.max(6, Math.min(14, Math.min(mask.width, mask.height) * 0.009));
+    try {
+      ctx.filter = "blur(" + Math.max(1, feather * sx).toFixed(2) + "px)";
+    } catch (error) {
+      /* 没有 canvas filter：退成硬边，形状仍在 */
+    }
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    for (var i = 0; i < points.length; i += 1) {
+      if (i === 0) ctx.moveTo(points[i][0] * sx, points[i][1] * sy);
+      else ctx.lineTo(points[i][0] * sx, points[i][1] * sy);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    return 'url("' + mask.canvas.toDataURL("image/png") + '")';
   }
 
   function polygonCss(points) {
@@ -416,7 +486,15 @@
           var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
           var progress = 1 - Math.pow(1 - t, 1.35);
           var points = holePolygon(progress, geometry);
-          stageRef.frame.style.clipPath = polygonCss(points);
+          if (stageRef.soft && stageRef.mask) {
+            var url = maskUrl(stageRef.mask, points);
+            if (url) {
+              stageRef.frame.style.maskImage = url;
+              stageRef.frame.style.webkitMaskImage = url;
+            }
+          } else {
+            stageRef.frame.style.clipPath = polygonCss(points);
+          }
           if (t >= 1) {
             // 满屏的同一帧跳转：地址栏换成目标站，页面内容已经是它
             finish(undefined);
