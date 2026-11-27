@@ -455,6 +455,7 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
       closePanel();
       if (isCurrent(site)) return;
       warmOrigin(site.href);
+      prerenderSite(site.href);
       openMenuSite(site, mode);
     },
     [closePanel, isCurrent, mode],
@@ -473,6 +474,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
         onPointerEnter={() => {
           highlight(index);
           warmOrigin(site.href);
+          // 这一行最可能要去的那个站：让浏览器在后台把它完整渲染好
+          prerenderSite(site.href);
         }}
         onFocus={() => highlight(index)}
         onClick={() => pick(site)}
@@ -593,4 +596,45 @@ function warmOrigin(href: string): void {
   link.href = origin;
   link.crossOrigin = "";
   document.head.appendChild(link);
+}
+
+/** Speculation Rules 的规则脚本：同一时刻只留一条（只预渲染"最可能要去的"那个站）。 */
+let prerenderScript: HTMLScriptElement | null = null;
+
+function supportsPrerender(): boolean {
+  const element = window.HTMLScriptElement as
+    | (typeof HTMLScriptElement & { supports?: (type: string) => boolean })
+    | undefined;
+  return typeof element?.supports === "function" && element.supports("speculationrules");
+}
+
+/**
+ * 悬停时让浏览器把这个站**在后台完整渲染好**（Speculation Rules 的 `prerender`）。
+ *
+ * 点击后浏览器直接接管那份已经渲染好、也跑完首屏请求的页面 —— 等于零等待，
+ * 不再有"白屏 / 转圈圈"那一段。
+ *
+ * 前提：目标站要回 `Supports-Loading-Mode: credentialed-prerender`（三站后端都已加）。
+ * 缺这个头时浏览器拒绝跨源带凭据预渲染，这里静默失效、退回普通跳转，功能不受影响。
+ * 浏览器不支持（非 Chromium 系）时同样静默跳过。
+ */
+function prerenderSite(href: string): void {
+  if (!supportsPrerender()) return;
+  let url: string;
+  try {
+    url = new URL(href, window.location.href).href;
+  } catch {
+    return;
+  }
+  if (url === window.location.href) return;
+  try {
+    prerenderScript?.remove();
+    const script = document.createElement("script");
+    script.type = "speculationrules";
+    script.textContent = JSON.stringify({ prerender: [{ source: "list", urls: [url] }] });
+    document.head.appendChild(script);
+    prerenderScript = script;
+  } catch {
+    /* 规则不合法就算了，最多慢一点 */
+  }
 }

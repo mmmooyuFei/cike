@@ -43,6 +43,22 @@ def seed_defaults() -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="笔记 · 备忘录 API", version="1.0.0", docs_url=None, redoc_url=None)
 
+    @app.middleware("http")
+    async def allow_cross_origin_prerender(request: Request, call_next):
+        """允许站群内的「切换站点」对本站做跨源预渲染。
+
+        跨源**带凭据**预渲染（Speculation Rules 的 `prerender`）要求目标文档显式回
+        `Supports-Loading-Mode: credentialed-prerender`，否则浏览器直接拒绝预渲染，
+        源页那边的规则静默失效、只能退回普通跳转（功能不受影响，只是省不到时间）。
+
+        只加在 HTML 文档上：静态资源带它没有意义。
+        """
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            if "text/html" in response.headers.get("content-type", ""):
+                response.headers["Supports-Loading-Mode"] = "credentialed-prerender"
+        return response
+
     app.include_router(auth.router)
     app.include_router(account.router)
     app.include_router(settings_router.router)
