@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./cike.db"
     session_secret: str = "dev-only-change-me"
     cookie_secure: bool = True
+    #: 会话有效期（天）。默认 7，与 Casdoor 的 SSO 会话一致：
+    #: 比 IdP 短会「IdP 还登着却要重登」，比 IdP 长则是 IdP 已过期后的假登录。
+    #: 用 `SESSION_DAYS` 覆盖。
+    session_days: int = 7
     dev_auth: bool = False
 
     oidc_issuer: str = ""

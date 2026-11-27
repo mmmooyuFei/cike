@@ -15,7 +15,9 @@ from .models import AuthSession, User, utcnow
 
 SESSION_COOKIE = "cike_session"
 CSRF_COOKIE = "cike_csrf"
-SESSION_DAYS = 7
+#: 兜底默认值：`SESSION_DAYS` 未配置时取 7 天。实际生效值见 `settings.session_days`
+#: （pydantic-settings 从 `.env` 读取，默认同为 7 —— 不配置也是对的）。
+DEFAULT_SESSION_DAYS = 7
 
 
 def hash_token(value: str) -> str:
@@ -66,7 +68,7 @@ def create_session(
         idp_token_expires_at=token_expires_at,
         idp_checked_at=utcnow(),
         idp_owner=idp_owner,
-        expires_at=utcnow() + timedelta(days=SESSION_DAYS),
+        expires_at=utcnow() + timedelta(days=settings.session_days),
         ip=request.client.host if request.client else None,
         user_agent=(request.headers.get("user-agent") or "")[:500],
     )
@@ -78,7 +80,7 @@ def create_session(
     response.set_cookie(
         SESSION_COOKIE,
         token,
-        max_age=SESSION_DAYS * 86400,
+        max_age=settings.session_days * 86400,
         httponly=True,
         secure=secure,
         samesite="lax",
@@ -87,7 +89,7 @@ def create_session(
     response.set_cookie(
         CSRF_COOKIE,
         csrf,
-        max_age=SESSION_DAYS * 86400,
+        max_age=settings.session_days * 86400,
         httponly=False,
         secure=secure,
         samesite="lax",
