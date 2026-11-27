@@ -451,6 +451,12 @@
   }
 
   function commit(href) {
+    // 告诉目标页：这一跳是站点切换来的，落地先盖住自己的 loading 壳
+    try {
+      global.name = ENTER_FLAG;
+    } catch (error) {
+      /* 写不了就算了，最多照旧闪一下 */
+    }
     // 必须用 assign 而不是 replace：replace 会把当前页从历史里顶掉，浏览器的「后退」就废了。
     // 也不能先摘 iframe 再跳 —— 那样会有一帧退回旧页；iframe 交给浏览器随文档一起回收。
     global.location.assign(href);
@@ -472,6 +478,12 @@
     if (!href) return Promise.resolve({ skipped: "no-href" });
     // 站群外、减少动效、没有 clip-path：一律普通跳转
     if (!sameGroup(href) || reduced() || !supportsClipPath()) {
+      note("退化为普通跳转", {
+        sameGroup: sameGroup(href),
+        reduced: reduced(),
+        clip: supportsClipPath(),
+        href: href,
+      });
       commit(href);
       return Promise.resolve({ skipped: "plain" });
     }
@@ -575,6 +587,7 @@
         readyTimer = global.setTimeout(function () {
           if (settled) return;
           // 超时：不铺洞，普通跳转（总比点了没反应好）
+          note("目标站 3s 内未就绪，退化为普通跳转", href);
           if (bead) bead.remove();
           finish("timeout");
           commit(href);
@@ -582,6 +595,7 @@
         pollTimer = global.setInterval(function () {
           if (settled) return;
           if (state.failed) {
+            note("目标站 iframe 加载失败，退化为普通跳转", href);
             finish("failed");
             if (bead) bead.remove();
             commit(href);
@@ -602,8 +616,70 @@
     });
   }
 
+  /** 交接标记：写在 `window.name` 里，同标签页跨站跳转也能带过去。 */
+  var ENTER_FLAG = "jiyi-ink|enter";
+
+  /** 当前页底色：优先 `html`，其次 `body`，都读不到就白。 */
+  function pageColor() {
+    try {
+      var html = global.getComputedStyle(doc.documentElement).backgroundColor;
+      if (html && html !== "rgba(0, 0, 0, 0)" && html !== "transparent") return html;
+      var body = doc.body ? global.getComputedStyle(doc.body).backgroundColor : "";
+      if (body && body !== "rgba(0, 0, 0, 0)" && body !== "transparent") return body;
+    } catch (error) {
+      /* 读不到就用默认 */
+    }
+    return "#ffffff";
+  }
+
+  /**
+   * 落地页的接续：上一步是站点切换过来的话，先盖一层和页面底色相同的整屏遮罩，
+   * 等首屏放行（`ready()`）再淡出。
+   *
+   * 解决的是"墨推开之后还要闪一下目标站自己的 loading 壳"：盖住这一小段，
+   * 观感上变成"底色 → 内容直接出现"。
+   */
+  function installEnterCover() {
+    var flagged = false;
+    try {
+      flagged = global.name === ENTER_FLAG;
+      if (flagged) global.name = "";
+    } catch (error) {
+      return null;
+    }
+    if (!flagged || !doc.documentElement) return null;
+    var cover = doc.createElement("div");
+    cover.dataset.jiyiInkEnter = "1";
+    cover.setAttribute("aria-hidden", "true");
+    cover.style.cssText =
+      "position:fixed;inset:0;z-index:" +
+      (Z_INDEX + 4) +
+      ";pointer-events:none;opacity:1;transition:opacity 240ms linear;background:" +
+      pageColor();
+    (doc.body || doc.documentElement).appendChild(cover);
+    return cover;
+  }
+
+  var enterCover = installEnterCover();
+  if (enterCover) {
+    global.setTimeout(function () {
+      clearEnterCover();
+    }, 1400);
+  }
+
+  function clearEnterCover() {
+    if (!enterCover) return;
+    var cover = enterCover;
+    enterCover = null;
+    cover.style.opacity = "0";
+    global.setTimeout(function () {
+      cover.remove();
+    }, 280);
+  }
+
   /** 目标站首屏就绪：在 iframe 里被调用时通知外层，可以推开墨洞了；顶层页面是空调用。 */
   function ready() {
+    clearEnterCover();
     if (!global.parent || global.parent === global) return;
     try {
       global.parent.postMessage({ type: "jiyi-ink:ready" }, "*");
@@ -628,6 +704,20 @@
       run();
     }
   });
+
+  /**
+   * 退化路径的诊断：只在"本该播过场却没播"时打一行 `[jiyi-ink]`。
+   *
+   * 线上排查时按 F12 看 Console：这一行会说明是哪条分支
+   * （站群外 / 减少动效 / 不支持裁切 / 目标站加载失败 / 3s 未就绪）。正常播过场时不打日志。
+   */
+  function note(reason, detail) {
+    try {
+      global.console.info("[jiyi-ink]", reason, detail || "");
+    } catch (error) {
+      /* 没有 console 就算了 */
+    }
+  }
 
   /* ============================================================ 守卫 */
 
