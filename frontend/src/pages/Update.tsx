@@ -19,7 +19,29 @@ type RepoState = {
   remote?: string;
   upstream?: string;
   sync?: { ahead: number; behind: number } | null;
+  local_commits?: LocalCommit[];
+  diverged?: boolean;
 };
+
+type LocalCommit = { hash: string; short: string; date: string; author: string; subject: string };
+
+type PullMode = "ff" | "rebase" | "reset";
+
+type PullResult = {
+  ok: boolean;
+  reason?: string;
+  mode?: PullMode;
+  before?: string;
+  after?: string;
+  changed?: boolean;
+  ahead?: number;
+  behind?: number;
+  local_commits?: LocalCommit[];
+  output?: string;
+  rebuild?: { queued: boolean; reason?: string };
+};
+
+type Conflict = { ahead: number; behind: number; commits: LocalCommit[]; output: string; conflict?: boolean };
 
 type RebuildState = {
   state: "idle" | "queued" | "running" | "success" | "failed";
@@ -89,6 +111,8 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
   const [settled, setSettled] = useState<"success" | "failed" | null>(null);
   const [giveUp, setGiveUp] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [conflict, setConflict] = useState<Conflict | null>(null);
+  const [divergedOpen, setDivergedOpen] = useState(false);
 
   const loadCommits = async () => {
     try {
@@ -191,22 +215,41 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
     setPolling(true);
   };
 
-  const pull = async () => {
+  const pull = async (mode: PullMode = "ff") => {
     const willRebuild = Boolean(status?.capabilities.rebuild);
-    const question = willRebuild
-      ? "会先 git pull --ff-only，再自动执行安全重建：备份数据库 → 构建镜像 → 重建容器 → 健康检查，失败自动回滚上一镜像。重建期间站点会短暂重启。继续？"
-      : "会用 git pull --ff-only 更新仓库。当前没有可用的宿主机重建执行器，拉取后不会自动生效。继续？";
+    const question =
+      mode === "reset"
+        ? `会丢弃部署机上的未推送提交（${aheadCount} 个），把仓库对齐到远端，然后自动安全重建。站点会短暂重启。确定？`
+        : mode === "rebase"
+          ? "会把部署机上的本地提交变基到远端之上，再自动安全重建。历史被改写，站点会短暂重启。继续？"
+          : willRebuild
+            ? "会先 git pull --ff-only，再自动执行安全重建：备份数据库 → 构建镜像 → 重建容器 → 健康检查，失败自动回滚上一镜像。重建期间站点会短暂重启。继续？"
+            : "会用 git pull --ff-only 更新仓库。当前没有可用的宿主机重建执行器，拉取后不会自动生效。继续？";
     if (!window.confirm(question)) return;
     setBusy("pull");
     try {
-      const result = await api.post<{
-        changed: boolean;
-        before: string;
-        after: string;
-        rebuild: { queued: boolean; reason?: string };
-      }>("/update/pull");
+      const result = await api.post<PullResult>("/update/pull", { mode });
+      if (!result.ok) {
+        if (result.reason === "diverged") {
+          setConflict({
+            ahead: result.ahead || 0,
+            behind: result.behind || 0,
+            commits: result.local_commits || [],
+            output: result.output || "",
+          });
+          ctx.toast("本地提交和远端分叉了：选「变基」保留，或「以远端为准」丢弃");
+        } else if (result.reason === "rebase_conflict") {
+          setConflict({ ahead: 0, behind: 0, commits: [], output: result.output || "", conflict: true });
+          ctx.toast("变基冲突，已自动中止；手动处理后重试");
+        } else {
+          ctx.toast("拉取没有成功");
+        }
+        await readStatus();
+        return;
+      }
+      setConflict(null);
       if (result.rebuild?.queued) {
-        ctx.toast("已拉取代码，正在自动重建，页面会自己更新");
+        ctx.toast(mode === "reset" ? "已对齐远端，正在自动重建" : "已拉取代码，正在自动重建，页面会自己更新");
         startPolling();
       } else if (result.changed) {
         ctx.toast(`已拉取 ${result.before} → ${result.after}`);
@@ -289,15 +332,22 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
     !rebuild.to.startsWith(status.running.commit_short || "\u0000") &&
     recentIso(rebuild.finished_at);
   const finished = !rebuilding && rebuild.state === "success" && settled === "success";
+  const aheadCount = conflict?.ahead || repo.sync?.ahead || 0;
+  const aheadCommits = (conflict?.commits?.length ? conflict.commits : repo.local_commits || []).slice(0, 6);
+  const behindCount = conflict?.behind || behind;
+  const diverged = Boolean(conflict) || Boolean(repo.diverged) || (aheadCount > 0 && behindCount > 0);
+  const canResolve = Boolean(repo.available) && status.capabilities.pull && !rebuilding;
   const state = rebuilding
     ? { text: "正在重建", tone: "warn" }
     : !repo.available
       ? { text: "未挂载仓库", tone: "muted" }
-      : outdated
-        ? { text: "仓库已更新，待重建", tone: "warn" }
-        : behind > 0
-          ? { text: `落后 ${behind} 个提交`, tone: "warn" }
-          : { text: "已是最新", tone: "ok" };
+      : diverged
+        ? { text: `本地 ${aheadCount} 个提交未推送`, tone: "warn" }
+        : outdated
+          ? { text: "仓库已更新，待重建", tone: "warn" }
+          : behind > 0
+            ? { text: `落后 ${behind} 个提交`, tone: "warn" }
+            : { text: "已是最新", tone: "ok" };
   const deployment = status.running.deployment === "docker" ? "Docker 容器" : "主机进程";
   const runningShort = status.running.commit_short || "—";
   const pullLabel = busy === "pull" ? "拉取中…" : status.capabilities.rebuild ? "拉取并重建" : "拉取更新";
@@ -341,7 +391,7 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
             type="button"
             className="primary"
             disabled={!status.capabilities.pull || busy !== null || rebuilding}
-            onClick={() => void pull()}
+            onClick={() => void pull("ff")}
           >
             {pullLabel}
           </button>
@@ -363,6 +413,52 @@ export function Update({ ctx }: { ctx: AppContextValue }) {
           </button>
         </div>
       </section>
+
+      {repo.available && aheadCount > 0 ? (
+        <div className="note">
+          <b>{diverged ? "本地提交和远端分叉了" : "部署机上有未推送的提交"}</b>
+          ：{aheadCount} 个提交只存在于这台机器
+          {aheadCommits.length ? `（${aheadCommits.map((item) => item.short).join("、")}）` : null}，
+          {behindCount > 0
+            ? `远端同时还有 ${behindCount} 个新提交，快进拉取会直接失败。`
+            : "远端暂时没有新提交，但先推回仓库再更新更稳。"}
+          {aheadCommits.length ? (
+            <>
+              <button type="button" className="ghost" onClick={() => setDivergedOpen((open) => !open)}>
+                {divergedOpen ? "收起提交" : "看看这些提交"}
+              </button>
+              {divergedOpen ? (
+                <ul className="upd-commit-list">
+                  {aheadCommits.map((item) => (
+                    <li key={item.hash}>
+                      <code>{item.short}</code>
+                      <span>{item.subject}</span>
+                      <em>{item.date} · {item.author}</em>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : null}
+          {behindCount > 0 ? (
+            <div className="upd-resolve">
+              <button type="button" disabled={!canResolve || busy !== null} onClick={() => void pull("rebase")}>
+                变基保留本地提交
+              </button>
+              <button
+                type="button"
+                className="ghost danger-text"
+                disabled={!canResolve || busy !== null}
+                onClick={() => void pull("reset")}
+              >
+                以远端为准并重建
+              </button>
+              <span>变基会改写这几笔提交的 hash；以远端为准会把它们从部署机上丢掉（先 push 才不丢）。</span>
+            </div>
+          ) : null}
+          {conflict?.output ? <pre className="upd-log">{conflict.output}</pre> : null}
+        </div>
+      ) : null}
 
       {!repo.available ? (
         <div className="note">

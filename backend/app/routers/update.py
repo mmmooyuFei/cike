@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from ..config import settings
 from ..models import User
@@ -148,6 +149,38 @@ def _commit_row(root: Path, raw: str, current: str) -> dict[str, Any] | None:
         "subject": _redact(subject, 200),
         "current": full.startswith(current) if current else False,
     }
+
+
+def _ahead_rows(root: Path, upstream: str, limit: int = 10) -> list[dict[str, Any]]:
+    """本地领先远端的提交：部署机上出现这种提交通常意味着有人直接改了服务器。"""
+    code, out, _ = _git(
+        root,
+        "log",
+        f"-n{limit}",
+        "--date=short",
+        "--pretty=format:%h%x1f%H%x1f%ad%x1f%an%x1f%s",
+        f"{upstream}..HEAD",
+    )
+    if code != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\x1f")
+        if len(fields) < 5:
+            continue
+        short, full, day, author, subject = fields[:5]
+        rows.append(
+            {
+                "hash": full,
+                "short": short,
+                "date": day,
+                "author": author,
+                "subject": _redact(subject, 200),
+            }
+        )
+    return rows
 
 
 def _data_dir() -> Path:
@@ -276,6 +309,7 @@ def _repo_state() -> dict[str, Any]:
     status_text = _git_ok(root, "status", "--porcelain")
     remote = _git_ok(root, "remote", "get-url", "origin")
     upstream = _upstream(root, branch)
+    sync = _ahead_behind(root, upstream)
     return {
         "available": True,
         "path": str(root),
@@ -290,7 +324,10 @@ def _repo_state() -> dict[str, Any]:
         "dirty_files": len([line for line in status_text.splitlines() if line.strip()]),
         "remote": _redact(remote),
         "upstream": upstream,
-        "sync": _ahead_behind(root, upstream),
+        "sync": sync,
+        # 部署机上不该出现本地提交：领先远端时列出来，页面据此提示「先推回仓库」或「对齐远端」
+        "local_commits": _ahead_rows(root, upstream) if (sync or {}).get("ahead") else [],
+        "diverged": bool((sync or {}).get("ahead") and (sync or {}).get("behind")),
     }
 
 
@@ -386,16 +423,75 @@ def _outdated(repo_commit: str, running_commit: str) -> bool:
     return not (bool(running_commit) and repo_commit.startswith(running_commit))
 
 
+class PullRequest(BaseModel):
+    """ff：只快进（默认）；rebase：保留本地提交并变基；reset：直接对齐远端。"""
+
+    mode: str = "ff"
+
+
+def _diverged_result(root: Path, upstream: str, output: str) -> dict[str, Any]:
+    """分叉不是错误，是一个要人来决定的状态：本地提交要保留还是丢。"""
+    sync = _ahead_behind(root, upstream) or {}
+    return {
+        "ok": False,
+        "reason": "diverged",
+        "ahead": sync.get("ahead", 0),
+        "behind": sync.get("behind", 0),
+        "local_commits": _ahead_rows(root, upstream),
+        "output": _redact(output, 400),
+        "status": _status_payload(),
+    }
+
+
 @router.post("/pull", dependencies=[Depends(require_csrf)])
-def pull(admin: User = Depends(require_admin)) -> dict:
-    """拉取代码；只要仓库 HEAD 与运行版本不一致就自动排队重建。"""
+def pull(payload: PullRequest | None = None, admin: User = Depends(require_admin)) -> dict:
+    """拉取代码；只要仓库 HEAD 与运行版本不一致就自动排队重建。
+
+    默认只允许快进。分叉（本地有未推送提交）时不擅自 reset，而是把两边的情况回给页面，
+    由人选择 rebase（保留本地提交）或 reset（以远端为准）。
+    """
+    mode = ((payload.mode if payload else "") or "ff").strip().lower()
+    if mode not in {"ff", "rebase", "reset"}:
+        raise HTTPException(status_code=400, detail="invalid_pull_mode")
     root = _repo_root()
     if root is None:
         raise HTTPException(status_code=409, detail="repo_not_mounted")
+    branch, _ = _branch(root)
+    upstream = _upstream(root, branch)
     before = _git_ok(root, "rev-parse", "HEAD")
-    code, out, stderr = _git(root, "pull", "--ff-only", timeout=FETCH_TIMEOUT)
-    if code != 0:
-        raise HTTPException(status_code=409, detail=f"pull_failed: {_redact(stderr or out)}")
+
+    if mode == "reset":
+        code, out, stderr = _git(root, "fetch", "--prune", "origin", timeout=FETCH_TIMEOUT)
+        if code != 0:
+            raise HTTPException(status_code=409, detail=f"fetch_failed: {_redact(stderr or out)}")
+        discarded = _ahead_rows(root, upstream)
+        code, out2, stderr2 = _git(root, "reset", "--hard", upstream)
+        if code != 0:
+            raise HTTPException(status_code=409, detail=f"reset_failed: {_redact(stderr2 or out2)}")
+        out = f"{out}\n{out2}"
+        if discarded:
+            dropped = "、".join(row["short"] for row in discarded)
+            out = f"{out}\n已丢弃本地提交：{dropped}"
+    elif mode == "rebase":
+        code, out, stderr = _git(root, "pull", "--rebase", "--autostash", timeout=FETCH_TIMEOUT)
+        if code != 0:
+            _git(root, "rebase", "--abort")
+            return {
+                "ok": False,
+                "reason": "rebase_conflict",
+                "output": _redact(stderr or out, 400),
+                "status": _status_payload(),
+            }
+    else:
+        code, out, stderr = _git(root, "pull", "--ff-only", timeout=FETCH_TIMEOUT)
+        if code != 0:
+            # 先刷新远端引用，再看看到底是分叉还是别的原因
+            _git(root, "fetch", "--prune", "origin", timeout=FETCH_TIMEOUT)
+            sync = _ahead_behind(root, upstream) or {}
+            if sync.get("ahead") and sync.get("behind"):
+                return _diverged_result(root, upstream, stderr or out)
+            raise HTTPException(status_code=409, detail=f"pull_failed: {_redact(stderr or out)}")
+
     after = _git_ok(root, "rev-parse", "HEAD")
     running = (settings.app_git_commit or "").strip()
     rebuild: dict[str, Any] = {"queued": False, "reason": "already_running"}
@@ -403,6 +499,7 @@ def pull(admin: User = Depends(require_admin)) -> dict:
         rebuild = _queue_rebuild("pull", after, running)
     return {
         "ok": True,
+        "mode": mode,
         "before": before[:8],
         "after": after[:8],
         "changed": before != after,

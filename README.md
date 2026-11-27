@@ -171,6 +171,13 @@ sudo bash scripts/install-update-runner.sh
 
 只想让页面看代码、不想让它更新时，把挂载改成 `./:/repo:ro`（页面会显示“只读挂载”），或在 `.env` 里设 `UPDATE_ALLOW_REBUILD=false`。
 
+部署机上出现本地提交（有人直接在服务器改代码并 commit）时，`git pull --ff-only` 会分叉失败。页面不会静默 reset，而是把两边都列出来：
+
+- 「变基保留本地提交」：`git pull --rebase --autostash`，冲突会自动 `rebase --abort` 并显示输出；
+- 「以远端为准并重建」：`git reset --hard origin/main`，会明确列出被丢弃的提交。
+
+正常做法仍然是在开发机提交、推送，部署机只做 `git pull`；页面上「领先 N 个提交」的提示就是这种情况的预警。
+
 「重启服务」默认关闭，需要 `UPDATE_ALLOW_RESTART=true` 且容器有 `restart` 策略。
 
 ## CNB 镜像
