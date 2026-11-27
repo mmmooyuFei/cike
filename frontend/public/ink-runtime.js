@@ -3,7 +3,8 @@
  *
  * 形态：**旧页不动，墨洞直接开在新站的真实页面上。**
  *
- *   点站点 → 落点先起一颗墨珠（几百毫秒的加载反馈）→ 目标站以 iframe 提前加载（悬停时就开始）
+ *   点站点 → 落点先起一颗墨珠（几百毫秒的加载反馈）→ 目标站以 iframe 提前加载（悬停时就开始），
+ *   它首屏放行时给 parent 发一条 `jiyi-ink:ready`，源页收到才推开（拿不到就等 450ms 兜底）
  *          → 目标站画出来后，从鼠标点推开：洞内是目标站的活页面，洞外还是当前页
  *          → 推开到满屏的同一帧 `location.assign()`，地址栏换成目标站（后退可回原页）
  *
@@ -35,14 +36,20 @@
   /** 覆盖层与 iframe 的层级：压过站内一切浮层。 */
   var Z_INDEX = 2147483000;
   /** 推开时长。 */
-  var REVEAL_MS = 640;
+  var REVEAL_MS = 700;
   /** 预热开始后最多等这么久就必须推开（到点没加载完就按普通跳转收场）。 */
   var READY_TIMEOUT_MS = 3000;
-  /** iframe `load` 之后再给渲染留的时间：load 不等于首帧。 */
-  var PAINT_SETTLE_MS = 140;
+  /**
+   * 拿不到「目标站首屏就绪」握手时的兜底等待。
+   *
+   * iframe 的 `load` 只代表资源到齐，不代表应用画好了（登录态、主题同步都在这之后）。
+   * 三站都会在首屏放行时给 parent 发 `jiyi-ink:ready`；没发的目标（老构建、导航台）
+   * 就等这么久再推开 —— 宁可晚一点，也不要洞里先闪一下“加载中”。
+   */
+  var PAINT_SETTLE_MS = 450;
   /** 墨环宽度占短边的比例（夹在下面两个值之间）。 */
-  var BAND_MIN = 28;
-  var BAND_MAX = 96;
+  var BAND_MIN = 14;
+  var BAND_MAX = 46;
   /** 墨纹烘焙尺寸。 */
   var INK_W = 384;
   var INK_H = 240;
@@ -356,6 +363,15 @@
   /**
    * 墨洞轮廓：与着色器同一条膨胀曲线 + 同一支 fbm。
    * 返回 `[{x,y}...]`，单位是视口像素。
+   *
+   * 与着色器的差别（**必须守住**）：着色器逐像素算 alpha，边界自交也不影响观感；
+   * 这里是**一个多边形**，一旦半径出现负值或相邻射线交叉，clip-path 的洞就退化成
+   * 一条自交的细线（洞里几乎没有面积，iframe 等于被完全裁掉）。
+   * 所以三条硬约束：
+   *   1. 半径恒正 —— 角度递增 + 半径为正的多边形天然不自交；
+   *   2. 噪声走低频（3.2/4.4，不是着色器的 7.8/10.6），相邻射线不会来回穿插；
+   *   3. 半径序列做一遍环形平滑，消掉尖刺。
+   * 抖动的幅度再乘一个「长大比例」，起手是一颗圆点，不会一开始就带锯齿。
    */
   function holePolygon(progress, geometry) {
     var width = geometry.width;
@@ -368,18 +384,35 @@
     var farY = Math.max(origin[1], 1 - origin[1]);
     var reach = Math.sqrt(farX * farX + farY * farY);
     var growth = -0.12 + (reach + 0.22 + 0.12) * progress;
-    var amplitude = (0.1 + geometry.roughness * 0.27) * Math.sin(progress * Math.PI);
-    var points = [];
+    var grown = Math.max(0, growth);
+    // 长大比例：0 → 1 之间夹住，起手不抖，涨到约 1/3 屏宽后给满抖动
+    var ramp = Math.min(1, grown / 0.35);
+    var amplitude = (0.14 + geometry.roughness * 0.34) * Math.sin(progress * Math.PI) * ramp;
+
+    var raw = new Array(RAYS);
     for (var i = 0; i < RAYS; i += 1) {
       var angle = (i / RAYS) * Math.PI * 2;
-      var cos = Math.cos(angle);
-      var sin = Math.sin(angle);
-      // 在「短边为 1」的坐标里取样，与着色器的 uv 空间一致
-      var sampleX = origin[0] + (cos * growth) / aspect;
-      var sampleY = origin[1] + sin * growth;
-      var value = field(sampleX * 7.8 + geometry.seed, sampleY * 10.6 + geometry.seed * 0.71);
-      var radius = growth + (value - 0.5) * amplitude;
-      points.push([originX + cos * radius * height, originY + sin * radius * height]);
+      var sampleX = origin[0] + (Math.cos(angle) * grown) / aspect;
+      var sampleY = origin[1] + Math.sin(angle) * grown;
+      raw[i] = field(sampleX * 3.2 + geometry.seed, sampleY * 4.4 + geometry.seed * 0.71);
+    }
+    // 环形平滑：一遍 [1,2,1]/4 就够（两遍会把墨迹磨成圆）
+    for (var pass = 0; pass < 1; pass += 1) {
+      var smoothed = new Array(RAYS);
+      for (var j = 0; j < RAYS; j += 1) {
+        var prev = raw[(j + RAYS - 1) % RAYS];
+        var next = raw[(j + 1) % RAYS];
+        smoothed[j] = (prev + raw[j] * 2 + next) / 4;
+      }
+      raw = smoothed;
+    }
+
+    var points = [];
+    for (var k = 0; k < RAYS; k += 1) {
+      var theta = (k / RAYS) * Math.PI * 2;
+      // 半径恒正：负的一律压到 0（洞还没开到那里）
+      var radius = Math.max(0, growth + (raw[k] - 0.5) * amplitude);
+      points.push([originX + Math.cos(theta) * radius * height, originY + Math.sin(theta) * radius * height]);
     }
     return points;
   }
@@ -404,34 +437,34 @@
       else ctx.lineTo(points[i][0], points[i][1]);
     }
     ctx.closePath();
-    var band = Math.max(BAND_MIN, Math.min(BAND_MAX, Math.min(width, height) * 0.055));
-    try {
-      ctx.filter = "blur(7px)";
-    } catch (error) {
-      /* 没有 filter 就画硬边，形态仍在 */
-    }
+    var band = Math.max(BAND_MIN, Math.min(BAND_MAX, Math.min(width, height) * 0.038));
     ctx.lineJoin = "round";
-    ctx.lineWidth = band;
-    ctx.strokeStyle = geometry.pattern;
-    ctx.globalAlpha = 0.92;
-    ctx.stroke();
-    // 内侧再压一道更深的墨，边界更“湿”
-    ctx.lineWidth = band * 0.45;
-    ctx.globalAlpha = 0.5;
-    ctx.strokeStyle = geometry.ink.base;
-    ctx.stroke();
+    ctx.lineCap = "round";
+    // 羽化不走 `ctx.filter = blur()`：每帧一次全屏高斯，软件渲染下会把整段动画饿死。
+    // 改成同一路径由粗到细描四道，外圈淡、内圈实，读起来仍是一条湿边。
+    var passes = [
+      [1, 0.34],
+      [0.72, 0.5],
+      [0.42, 0.66],
+      [0.16, 0.8],
+    ];
+    for (var k = 0; k < passes.length; k += 1) {
+      ctx.lineWidth = band * passes[k][0];
+      ctx.globalAlpha = passes[k][1];
+      ctx.strokeStyle = geometry.pattern || geometry.ink.base;
+      ctx.stroke();
+    }
     ctx.restore();
   }
-
 
   /**
    * 落点的墨珠：点击那一刻先给一个反馈。
    *
    * 目标站还没在 iframe 里画出来时（没预热到、或者网络慢），什么都不显示会像"点了没反应"。
-   * 这颗珠子只表示"墨已经从这儿出来了"，等舞台铺开就摘掉。
+   * 这颗珠子只表示"墨已经从这儿出来了"：350ms 后自己散掉，舞台铺开的那一刻也会被摘掉。
    */
   function createBead(point, ink) {
-    var size = 34;
+    var size = 30;
     var bead = doc.createElement("div");
     bead.dataset.jiyiInkStage = "1";
     bead.setAttribute("aria-hidden", "true");
@@ -446,7 +479,7 @@
       size +
       "px;border-radius:50%;z-index:" +
       Z_INDEX +
-      ";pointer-events:none;opacity:0;transform:scale(.45);" +
+      ";pointer-events:none;opacity:0;transform:scale(.55);" +
       "background:radial-gradient(circle at 48% 42%," +
       ink.grain +
       " 0%," +
@@ -454,12 +487,19 @@
       " 38%," +
       ink.wash +
       " 72%,rgba(0,0,0,0) 74%);" +
-      "transition:opacity 110ms linear,transform 460ms cubic-bezier(.2,.72,.28,1)";
+      "transition:opacity 300ms linear,transform 520ms cubic-bezier(.2,.72,.28,1)";
     doc.body.appendChild(bead);
     global.requestAnimationFrame(function () {
-      bead.style.opacity = "0.95";
-      bead.style.transform = "scale(1.7)";
+      bead.style.opacity = "0.92";
+      bead.style.transform = "scale(1)";
     });
+    global.setTimeout(function () {
+      bead.style.opacity = "0";
+      bead.style.transform = "scale(2.2)";
+    }, 350);
+    global.setTimeout(function () {
+      bead.remove();
+    }, 900);
     return bead;
   }
 
@@ -523,8 +563,10 @@
 
       function start() {
         if (settled) return;
+        pendingStart = null;
         loadCover(settings.coverUrl).then(function (cover) {
           if (settled) return;
+          if (bead) bead.remove();
           var baked = bakeInk({ ink: inkPalette(dark), cover: cover, seed: seed });
           var stageRef = createStage(state);
           stage = stageRef;
@@ -548,8 +590,9 @@
             geometry.pattern = geometry.ink.base;
           }
           if (ctx) {
-            stageRef.canvas.width = Math.max(1, Math.round(width * Math.min(2, global.devicePixelRatio || 1)));
-            stageRef.canvas.height = Math.max(1, Math.round(height * Math.min(2, global.devicePixelRatio || 1)));
+            var bandDpr = Math.min(1.5, Math.max(1, global.devicePixelRatio || 1));
+            stageRef.canvas.width = Math.max(1, Math.round(width * bandDpr));
+            stageRef.canvas.height = Math.max(1, Math.round(height * bandDpr));
             ctx.setTransform(stageRef.canvas.width / Math.max(1, width), 0, 0, stageRef.canvas.height / Math.max(1, height), 0, 0);
           }
 
@@ -560,7 +603,7 @@
             if (previous) elapsed += Math.min(50, timestamp - previous);
             previous = timestamp;
             var t = duration <= 0 ? 1 : clamp01(elapsed / Math.max(1, duration));
-            var progress = 1 - Math.pow(1 - t, 1.7);
+            var progress = 1 - Math.pow(1 - t, 1.35);
             var points = holePolygon(progress, geometry);
             stageRef.frame.style.clipPath = polygonCss(points);
             if (ctx) paintBand(ctx, points, geometry);
@@ -576,10 +619,26 @@
         });
       }
 
+      var settleTimer = 0;
+
+      function beginPending() {
+        pendingStart = null;
+        if (settleTimer) {
+          global.clearTimeout(settleTimer);
+          settleTimer = 0;
+        }
+        if (!settled) start();
+      }
+
       function waitForPaint() {
         if (settled) return;
-        // load 之后仍要给目标站一点渲染时间；SSO 会话在 iframe 里通常已经热了
-        global.setTimeout(start, PAINT_SETTLE_MS);
+        // 已经收到过握手（预热够久）：立刻推开
+        if (state.signaled) {
+          start();
+          return;
+        }
+        pendingStart = { frame: state.frame, start: beginPending };
+        settleTimer = global.setTimeout(beginPending, PAINT_SETTLE_MS);
       }
 
       if (state.loaded) {
@@ -615,6 +674,33 @@
     });
   }
 
+  /** 目标站首屏就绪：在 iframe 里被调用时通知外层，可以推开墨洞了；顶层页面是空调用。 */
+  function ready() {
+    if (!global.parent || global.parent === global) return;
+    try {
+      global.parent.postMessage({ type: "jiyi-ink:ready" }, "*");
+    } catch (error) {
+      /* 跨源写不了就算了，外层会走兜底等待 */
+    }
+  }
+
+  /** 正在等某个目标站的握手（同一时刻只可能有一个）。 */
+  var pendingStart = null;
+
+  global.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || typeof data !== "object" || data.type !== "jiyi-ink:ready") return;
+    Object.keys(warmFrames).forEach(function (key) {
+      var item = warmFrames[key];
+      if (item && item.frame.contentWindow === event.source) item.signaled = true;
+    });
+    if (pendingStart && pendingStart.frame.contentWindow === event.source) {
+      var run = pendingStart.start;
+      pendingStart = null;
+      run();
+    }
+  });
+
   /* ============================================================ 守卫 */
 
   global.addEventListener("pageshow", function (event) {
@@ -629,6 +715,7 @@
 
   global.JiyiInk = {
     version: 3,
+    ready: ready,
     switchTo: switchTo,
     warm: warm,
     cancelWarm: cancelWarm,
@@ -638,6 +725,16 @@
     inkPalette: inkPalette,
     sameGroup: sameGroup,
     // 自测用
-    _internal: { bakeInk: bakeInk, holePolygon: holePolygon, field: field },
+    _internal: {
+      bakeInk: bakeInk,
+      holePolygon: holePolygon,
+      field: field,
+      debugState: function () {
+        return Object.keys(warmFrames).map(function (key) {
+          var item = warmFrames[key];
+          return { key: key, loaded: item.loaded, signaled: !!item.signaled, failed: item.failed };
+        }).concat([{ pending: !!pendingStart, stage: !!stage }]);
+      },
+    },
   };
 })(window, document);

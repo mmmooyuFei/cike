@@ -35,6 +35,7 @@ export interface InkSwitchOptions {
 interface InkRuntime {
   version: number;
   switchTo(options: InkSwitchOptions): Promise<{ skipped?: string }>;
+  ready(): void;
   warm(href: string): void;
   cancelWarm(href: string): void;
   dropWarm(): void;
@@ -46,6 +47,15 @@ function runtime(): InkRuntime | null {
   if (typeof window === "undefined") return null;
   const api = (window as unknown as { JiyiInk?: InkRuntime }).JiyiInk;
   return api && typeof api.switchTo === "function" ? api : null;
+}
+
+/**
+ * 目标站首屏就绪：站点被站点切换的 iframe 嵌着时，通知外层可以推开墨洞了。
+ *
+ * 顶层页面里是空调用（parent === self），所以三站的入口都可以无条件调。
+ */
+export function notifyInkReady(): void {
+  runtime()?.ready();
 }
 
 /** 目标是否与当前页同一站群（同一站群里才播过场）。 */
