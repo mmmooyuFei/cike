@@ -18,7 +18,6 @@ import { Habits } from "./pages/Habits";
 import { ModulePage } from "./pages/Modules";
 import { Todos } from "./pages/Todos";
 import { Update } from "./pages/Update";
-import { notifyInkReady } from "./inkTransition";
 import { SiteSwitcher } from "./SiteSwitcher";
 import { applyTheme, readTheme, saveTheme, type Theme } from "./theme";
 import type { AppContextValue, Brand, HabitItem, RecordItem } from "./types";
@@ -68,12 +67,6 @@ function readHash(): string {
 export default function App() {
   const { session, loading, loginDev, logout, refresh: refreshSession } = useAuth();
 
-  // 被站点切换的 iframe 嵌着时：会话探完、首屏挂上这一帧，通知外层可以推开墨洞。
-  useEffect(() => {
-    if (loading) return undefined;
-    const frame = window.requestAnimationFrame(() => notifyInkReady());
-    return () => window.cancelAnimationFrame(frame);
-  }, [loading]);
   const [route, setRoute] = useState(readHash);
   const [refreshKey, setRefreshKey] = useState(0);
   const [brand, setBrand] = useState<Brand>({ name: "此刻", subtitle: "笔记 · 备忘录", logo_url: "" });

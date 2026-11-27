@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { cancelPreload, isSameSiteGroup, preloadTarget, switchWebsite } from "./inkTransition";
 import { NAV_MENU_FALLBACK, fetchNavMenu, openMenuSite, type MenuSite, type NavMenu } from "./menu";
 import {
   ANCHOR_OFFSET,
@@ -419,36 +418,18 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
   );
 
   /**
-   * 点站点：站群内一律**当前标签**跳转并播墨迹过场（从鼠标点涨墨 → 新站接手退墨）。
+   * 点站点：关面板，然后按设置打开（同标签直达 / 新标签）。
    *
-   * - 过场只在同一个标签里成立，所以站群内不再看 `openMode`；跨站群的地址仍按设置打开。
-   * - 当前站那一行不跳：点了等于原地刷新，还要白跑一次过场。
-   * - 键盘激活（Enter / 空格）拿不到 clientX/Y，此时用该行中心当圆心。
+   * 当前站那一行不跳 —— 点了等于原地刷新。
    */
-  /** 当前预热的那个目标：换行/关面板时要丢掉上一个 */
-  const preloadRef = useRef<string | null>(null);
-
   const pick = useCallback(
-    (site: MenuSite, event: MouseEvent<HTMLButtonElement>) => {
-      if (isCurrent(site)) {
-        closePanel();
-        return;
-      }
-      const rect = event.currentTarget.getBoundingClientRect();
-      const point =
-        event.clientX || event.clientY
-          ? { x: event.clientX, y: event.clientY }
-          : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-      const href = site.href;
+    (site: MenuSite) => {
       closePanel();
-      if (isSameSiteGroup(href)) {
-        // 墨洞直接开在目标站上，洞边不画描边
-        switchWebsite({ href, point });
-        return;
-      }
+      if (isCurrent(site)) return;
+      warmOrigin(site.href);
       openMenuSite(site, mode);
     },
-    [closePanel, mode],
+    [closePanel, isCurrent, mode],
   );
 
   const rows = sites.map((site, index) => {
@@ -463,13 +444,10 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
         aria-current={current ? "true" : undefined}
         onPointerEnter={() => {
           highlight(index);
-          // 只留一个预热：换到别的行就把上一个丢掉，别让三个站的后台页都挂着
-          if (preloadRef.current && preloadRef.current !== site.href) cancelPreload(preloadRef.current);
-          preloadRef.current = site.href;
-          preloadTarget(site.href);
+          warmOrigin(site.href);
         }}
         onFocus={() => highlight(index)}
-        onClick={(event) => pick(site, event)}
+        onClick={() => pick(site)}
       >
         <span className="site-names">
           <b>{site.title}</b>
@@ -561,3 +539,30 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
 }
 
 export const SITE_SWITCHER_ANCHOR_OFFSET = ANCHOR_OFFSET;
+
+/**
+ * 让「点站点」那一跳尽可能快：悬停/打开面板时就把目标源的连接建好。
+ *
+ * 点击本身仍然是**一次普通导航**（`location.assign` / 新标签），这里只做减速项里
+ * 最便宜也最有效的那个 —— `preconnect` 省掉 DNS + TCP + TLS（线上通常 100–300ms）。
+ *
+ * 不预取 HTML：站点是跨源的，浏览器的 HTTP 缓存按顶层站点分区，源站预取的响应
+ * 到目标站用不上，白费流量。
+ */
+const warmedOrigins = new Set<string>();
+
+function warmOrigin(href: string): void {
+  let origin: string;
+  try {
+    origin = new URL(href, window.location.href).origin;
+  } catch {
+    return;
+  }
+  if (!origin || warmedOrigins.has(origin) || origin === window.location.origin) return;
+  warmedOrigins.add(origin);
+  const link = document.createElement("link");
+  link.rel = "preconnect";
+  link.href = origin;
+  link.crossOrigin = "";
+  document.head.appendChild(link);
+}
