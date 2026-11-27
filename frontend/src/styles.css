@@ -899,6 +899,24 @@ span.avatar-big { background: linear-gradient(140deg, var(--avatar-a), var(--ava
   will-change: transform;
 }
 
+/* 没封面（内置兜底清单 / 图挂了）：别留一块死黑，用品牌色的氛围底 + 首字 */
+.site-card.is-blank {
+  background:
+    radial-gradient(120% 90% at 18% 10%, color-mix(in srgb, var(--gold) 34%, transparent), transparent 60%),
+    linear-gradient(150deg, #1a2b22, #0b0d10 62%);
+}
+.site-card.is-blank::before {
+  content: attr(data-initial);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--serif);
+  font-size: 46px;
+  line-height: 1;
+  color: color-mix(in srgb, #fff 46%, transparent);
+}
+
 .site-card img {
   position: absolute;
   inset: 0;

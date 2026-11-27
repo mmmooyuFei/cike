@@ -94,6 +94,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
   const motion = useRef<Motion | null>(null);
   const activeRef = useRef(0);
   const openRef = useRef(false);
+  /** 渲染态 `mounted` 的镜像：`openPanel` 是 useCallback，闭包里的 `mounted` 会一直停在旧值。 */
+  const mountedRef = useRef(false);
 
   /**
    * 逻辑上的开合意图：连点时立刻翻转，不等弹簧落位。
@@ -107,6 +109,7 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
 
   activeRef.current = active;
   openRef.current = open;
+  mountedRef.current = mounted;
 
   const sites = menu?.sites ?? [];
   const mode = menu?.openMode ?? "newTab";
@@ -152,6 +155,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
 
     panelRef.current.style.width = `${Math.round(g.stacked ? w : w + gap + deckWidth)}px`;
     panelRef.current.style.height = `${Math.round(g.stacked ? h + (STACK_DECK_H + DECK_PAD * 2 + gap) * p : h)}px`;
+    // 窄屏是「站名在上、卡组在下」的竖排：不切 column 的话卡组会被挤到面板右侧、被 overflow 剪掉
+    panelRef.current.style.flexDirection = g.stacked ? "column" : "row";
     panelRef.current.style.opacity = String(Math.min(1, p * 3));
 
     const list = listRef.current;
@@ -172,7 +177,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
       deck.style.height = `${Math.round(g.stacked ? STACK_DECK_H + DECK_PAD * 2 : h)}px`;
       deck.style.padding = g.stacked ? `${DECK_PAD}px` : `${DECK_PAD}px ${DECK_PAD}px ${DECK_PAD}px 0`;
       deck.style.marginLeft = g.stacked ? "0px" : `${Math.round(gap)}px`;
-      deck.style.marginBottom = g.stacked ? `${Math.round(gap)}px` : "0px";
+      deck.style.marginBottom = "0px";
+      deck.style.marginTop = "0px";
       deck.style.opacity = String(Math.min(1, p * 1.6));
     }
     if (iconRef.current) {
@@ -309,11 +315,11 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
   }, [stopLoop]);
 
   const openPanel = useCallback(() => {
-    // 正在收起、且还没卸载时又点开：不重建弹簧，把目标改回展开值，视觉上接着走。
-    // 必须带 `mounted`：收起已经落位（portal 已卸载）时 motion 里的 phase 仍是 closing，
-    // 只按 phase 判断会走进「接着展开」这条路，面板却永远不再挂回来。
+    // 正在收起、且还挂载着时又点开：不重建弹簧，把目标改回展开值，视觉上接着走。
+    // 必须同时看 `mountedRef`（不是闭包里的 `mounted`）：收起已经落位、portal 早已卸载时，
+    // 走这条路只会 `setOpen(true)` 却不再挂回面板 —— 表现就是「收起之后再点没反应」。
     const active = motion.current;
-    if (active && active.phase === "closing" && mounted) {
+    if (active && active.phase === "closing" && mountedRef.current) {
       intentRef.current = true;
       active.phase = "open";
       applyOpenTempo(active);
@@ -374,11 +380,37 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     run();
   }, [run]);
 
-  // 打开后：定位、设目标、动画开始、焦点落到当前站
+  /**
+   * 站点列表是「面板打开之后」才取的：那一刻 `sites` 还是空数组，弹簧与卡组按 0 项建好，
+   * 几何算出 `deckWidth = 0`（面板只剩站名那一栏）。菜单回来时必须按新的项数补上卡组、
+   * 重新量一次几何，否则面板永远只显示标题、没有封面卡。
+   */
+  const syncCards = useCallback(() => {
+    const m = motion.current;
+    if (!m || m.cards.length === sites.length) return;
+    const index = sites.findIndex((site) => {
+      try {
+        return Boolean(host) && new URL(site.href).host === host;
+      } catch {
+        return false;
+      }
+    });
+    const initialActive = Math.max(0, index);
+    m.cards = sites.map((_, i) => spring(i === initialActive ? 0 : 102, OPEN_CARD.stiffness, OPEN_CARD.damping));
+    m.zLayers = sites.map((_, i) => (i === initialActive ? 1 : 0));
+    m.layer = 1;
+    activeRef.current = initialActive;
+    setActive(initialActive);
+  }, [sites, host]);
+
+  // 打开后：定位、设目标、动画开始、焦点落到当前站。
+  // 也跟 `sites.length`：菜单晚到时在这里补卡组、重新量几何，并换掉 rAF 循环里的旧回调。
   useEffect(() => {
     if (!mounted) return;
+    syncCards();
     applyTargets();
     if (motion.current) motion.current.phase = "open";
+    stopLoop();
     run();
     const index = Math.max(
       0,
@@ -393,7 +425,7 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
     const node = listRef.current?.querySelectorAll<HTMLButtonElement>("[data-site-row]")[index];
     node?.focus({ preventScroll: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted]);
+  }, [mounted, sites.length]);
 
   // 卡片上的说明文字：只有最前面那一张亮起
   useEffect(() => {
@@ -497,7 +529,8 @@ export function SiteSwitcher({ mobile = false }: { mobile?: boolean }) {
         ref={(node) => {
           cardRefs.current[index] = node;
         }}
-        className="site-card"
+        className={`site-card${cover ? "" : " is-blank"}`}
+        data-initial={site.title.slice(0, 1)}
         aria-hidden="true"
       >
         {cover ? (
